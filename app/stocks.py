@@ -14,7 +14,7 @@ def fetch_snapshot(tickers: List[str]) -> Dict[str, Any]:
     }
     """
     start = time.time()
-    #app yfin can fetch multuple tickers at once
+    #app yfin can fetch multiple tickers at once
     data = yf.download(
         tickers=tickers,
         period="1d",
@@ -27,7 +27,7 @@ def fetch_snapshot(tickers: List[str]) -> Dict[str, Any]:
     print("DATA EMPTY:", data.empty)
     print("COLUMNS:", data.columns)
     print("TAIL:", data.tail(2))
-    
+
     ticker_out : Dict[str, Dict[str, float]] = {}
 
     for t in tickers:
