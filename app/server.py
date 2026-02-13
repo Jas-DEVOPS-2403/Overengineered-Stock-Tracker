@@ -18,3 +18,7 @@ def metrics():
     snapshot = cached if cached is not None else _refresh_snapshot()
     body, content_type = snapshot_to_prometheus(snapshot, TICKERS)
     return Response(content=body, media_type=content_type)
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
