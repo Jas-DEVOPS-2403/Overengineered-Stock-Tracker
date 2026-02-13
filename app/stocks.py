@@ -63,6 +63,6 @@ def fetch_snapshot(tickers: List[str]) -> Dict[str, Any]:
 
     return {
         "asof_ts": int(time.time()),
-        "fetch_latency_sec": latency,
+        "fetch_latency_seconds": latency,
         "tickers": ticker_out
     }
