@@ -1,68 +1,64 @@
+import os
 import time
-from tracemalloc import start
-from typing import Dict, Any, List
-import yfinance as yf
+from typing import Any, Dict, List
+
+import requests
+
+
+SYMBOL_MAP = {
+    "BRK-B": "BRK.B",
+}
+
+
+def _to_provider_symbol(ticker: str) -> str:
+    return SYMBOL_MAP.get(ticker, ticker)
+
 
 def fetch_snapshot(tickers: List[str]) -> Dict[str, Any]:
     """
-    returns a bounded snapshot:
+    Snapshot schema:
     {
-        "asof_ts": <unix>,
-        "tickers":{
-            "NVDA": {"price":213.45, "change_pct":0.27}}
-            ...
+      "asof_ts": <unix>,
+      "fetch_latency_seconds": <float>,
+      "tickers": {
+        "AAPL": {"price": 123.4, "change_pct": 1.23},
+      }
     }
     """
-    start = time.time()
-    #app yfin can fetch multiple tickers at once
-    data = yf.download(
-        tickers=tickers,
-        period="1d",
-        interval="1m",
-        group_by='ticker',
-        auto_adjust=True,
-        threads=True,
-        progress=False
-    )
-    print("DATA EMPTY:", data.empty)
-    print("COLUMNS:", data.columns)
-    print("TAIL:", data.tail(2))
+    token = os.getenv("FINNHUB_API_KEY")
+    if not token:
+        raise RuntimeError("FINNHUB_API_KEY is not set")
 
-    ticker_out : Dict[str, Dict[str, float]] = {}
+    started = time.time()
+    out: Dict[str, Any] = {
+        "asof_ts": int(time.time()),
+        "fetch_latency_seconds": 0.0,
+        "tickers": {},
+    }
 
-    for t in tickers:
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Overengineered-Stock-Tracker/1.0"})
+
+    for ticker in tickers:
+        provider_symbol = _to_provider_symbol(ticker)
         try:
-            #when multiple tickers, columns are multiindexed: (field, ticker) or (ticker, field)
-            #yfin can be inconsistent need to be able to handle both patterns
-            if hasattr(data.columns, 'levels') and len(data.columns.levels) == 2:
-                if ("Close", t) in data.columns:
-                    close_series = data[("Close", t)].dropna()
-                else:
-                    #try (ticker, field) pattern
-                    close_series = data[(t, "Close")].dropna()
+            resp = session.get(
+                "https://finnhub.io/api/v1/quote",
+                params={"symbol": provider_symbol, "token": token},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            quote = resp.json()
 
-            else:
-                #single ticker case (flat columns)
-                close_series = data["Close"].dropna()
-
-            if len(close_series) < 2:
+            price = float(quote.get("c") or 0.0)
+            prev_close = float(quote.get("pc") or 0.0)
+            if price <= 0:
                 continue
 
-            last = float(close_series.iloc[-1])
-            prev = float(close_series.iloc[-2])
-            change_pct = (last - prev) * 100 if prev != 0 else 0.0
-
-            ticker_out[t] = {
-                "price": last,
-                "change_pct": change_pct
-            }
+            change_pct = ((price - prev_close) / prev_close * 100.0) if prev_close else 0.0
+            out["tickers"][ticker] = {"price": price, "change_pct": change_pct}
         except Exception:
             continue
 
-    latency = time.time() - start
-
-    return {
-        "asof_ts": int(time.time()),
-        "fetch_latency_seconds": latency,
-        "tickers": ticker_out
-    }
+    out["fetch_latency_seconds"] = time.time() - started
+    return out
