@@ -1,0 +1,25 @@
+prometheus.scrape "stock_tracker" {
+  targets = [
+    {
+      __address__      = "overengineered-stock-tracker.onrender.com:443",
+      __metrics_path__ = "/metrics",
+    },
+  ]
+
+  scheme = "https"
+  scrape_interval = "60s"
+  scrape_timeout = "45s"
+  forward_to = [prometheus.remote_write.metrics_hosted_prometheus.receiver]
+}
+
+prometheus.remote_write "metrics_hosted_prometheus" {
+  endpoint {
+    name = "hosted-prometheus"
+    url  = "https://prometheus-prod-37-prod-ap-southeast-1.grafana.net/api/prom/push"
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}
