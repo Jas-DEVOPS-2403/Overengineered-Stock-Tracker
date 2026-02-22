@@ -1,7 +1,15 @@
 {
-  "asof_ts": 1771743835,
-  "fetch_latency_seconds": 21.356257915496826,
+  "asof_ts": 1771746040,
+  "fetch_latency_seconds": 1.349076747894287,
   "tickers": {
+    "VOO": {
+      "price": 634.02,
+      "change_pct": 0.7132305052976045
+    },
+    "SPY": {
+      "price": 689.43,
+      "change_pct": 0.7231767180925566
+    },
     "NVDA": {
       "price": 189.82,
       "change_pct": 1.0218201170835484
@@ -39,5 +47,5 @@
       "change_pct": 1.1430896715004557
     }
   },
-  "generated_at": 1771743856
+  "generated_at": 1771746041
 }
