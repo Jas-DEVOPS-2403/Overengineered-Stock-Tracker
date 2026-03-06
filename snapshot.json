@@ -1,51 +1,51 @@
 {
-  "asof_ts": 1772824169,
-  "fetch_latency_seconds": 0.975787878036499,
+  "asof_ts": 1772826341,
+  "fetch_latency_seconds": 1.210808515548706,
   "tickers": {
     "VOO": {
-      "price": 620.27,
-      "change_pct": -1.043378376222454
+      "price": 620.51,
+      "change_pct": -1.0050892614986926
     },
     "SPY": {
-      "price": 674.35,
-      "change_pct": -1.0215614037662626
+      "price": 674.65,
+      "change_pct": -0.9775285846384126
     },
     "NVDA": {
-      "price": 180.72,
-      "change_pct": -1.429038944038401
+      "price": 180.15,
+      "change_pct": -1.739936729573469
     },
     "MSFT": {
-      "price": 410.77,
-      "change_pct": 0.021914872893731126
+      "price": 409.89,
+      "change_pct": -0.1923638842894761
     },
     "AAPL": {
-      "price": 256.62,
-      "change_pct": -1.40996580736871
+      "price": 257.01,
+      "change_pct": -1.2601329286565097
     },
     "GOOGL": {
-      "price": 299.44,
-      "change_pct": -0.4785961180537084
+      "price": 298.67,
+      "change_pct": -0.7345120978463107
     },
     "AMZN": {
-      "price": 215.02,
-      "change_pct": -1.7904448707408365
+      "price": 213.43,
+      "change_pct": -2.5166712341280673
     },
     "TSLA": {
       "price": 398.91,
       "change_pct": -1.6372827025027705
     },
     "META": {
-      "price": 645.19,
-      "change_pct": -2.3282922324658997
+      "price": 644.99,
+      "change_pct": -2.3585691145525893
     },
     "BRK-B": {
-      "price": 496.31,
-      "change_pct": -0.8173461231015138
+      "price": 498.22,
+      "change_pct": -0.43565147881693644
     },
     "BLK": {
-      "price": 950.34,
-      "change_pct": -8.179710144927533
+      "price": 958.06,
+      "change_pct": -7.433816425120779
     }
   },
-  "generated_at": 1772824170
+  "generated_at": 1772826342
 }
