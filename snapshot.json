@@ -1,19 +1,7 @@
 {
-  "asof_ts": 1774072918,
-  "fetch_latency_seconds": 0.9893274307250977,
+  "asof_ts": 1774075966,
+  "fetch_latency_seconds": 37.3292396068573,
   "tickers": {
-    "VOO": {
-      "price": 597.94,
-      "change_pct": -1.4519983518747335
-    },
-    "SPY": {
-      "price": 648.57,
-      "change_pct": -1.7020309184601252
-    },
-    "NVDA": {
-      "price": 172.7,
-      "change_pct": -3.2818100358423017
-    },
     "MSFT": {
       "price": 381.87,
       "change_pct": -1.8379517762582842
@@ -47,5 +35,5 @@
       "change_pct": -1.2056518151815239
     }
   },
-  "generated_at": 1774072919
+  "generated_at": 1774076003
 }
