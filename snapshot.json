@@ -1,6 +1,6 @@
 {
-  "asof_ts": 1774201466,
-  "fetch_latency_seconds": 0.41315674781799316,
+  "asof_ts": 1774202292,
+  "fetch_latency_seconds": 0.5605649948120117,
   "tickers": {
     "VOO": {
       "price": 597.96,
@@ -47,5 +47,5 @@
       "change_pct": -1.2035891089108985
     }
   },
-  "generated_at": 1774201466
+  "generated_at": 1774202293
 }
