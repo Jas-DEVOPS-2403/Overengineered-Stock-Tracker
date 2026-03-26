@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: overengineered-stock-tracker
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: 8000
