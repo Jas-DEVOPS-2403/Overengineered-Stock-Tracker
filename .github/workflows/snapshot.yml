@@ -2,7 +2,9 @@ name: Update Snapshot
 
 on:
   schedule:
-    - cron: "*/5 * * * *" 
+    # Every 15 minutes during market hours is more than enough for a personal project.
+    # Change to "0 */1 * * *" (hourly) or simply disable in GitHub UI when done.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +30,13 @@ jobs:
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
         run: python fetch_snapshot.py
+
+      - name: Push metrics to Grafana Cloud
+        env:
+          GRAFANA_REMOTE_WRITE_URL: ${{ secrets.GRAFANA_REMOTE_WRITE_URL }}
+          GRAFANA_CLOUD_PROM_USER: ${{ secrets.GRAFANA_CLOUD_PROM_USER }}
+          GRAFANA_CLOUD_API_KEY: ${{ secrets.GRAFANA_CLOUD_API_KEY }}
+        run: python push_metrics.py
 
       - name: Commit snapshot
         run: |
