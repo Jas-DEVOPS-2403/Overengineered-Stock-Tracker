@@ -105,8 +105,8 @@ def snapshot_to_metrics(snapshot: dict) -> list:
 
 def push(metrics: list, url: str, user: str, token: str) -> None:
     proto = build_write_request(metrics)
-    # Prometheus remote_write uses raw (block) snappy, matching Go's snappy.Encode.
-    compressed = snappy.raw_compress(proto)
+    # snappy.compress() produces raw block format, matching Go's snappy.Encode used by remote_write.
+    compressed = snappy.compress(proto)
 
     resp = requests.post(
         url,
