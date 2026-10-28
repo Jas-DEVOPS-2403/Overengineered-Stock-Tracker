@@ -22,6 +22,7 @@ Three things about this API that are easy to get wrong:
 """
 
 import os
+import time
 from typing import Any, Dict, List, Tuple
 
 import requests
@@ -30,6 +31,13 @@ from app import config
 
 BASE_URL = "https://www.alphavantage.co/query"
 TIMEOUT = 20
+
+# Alpha Vantage asks for at most 1 request per second on the free tier, and
+# enforces it separately from the 25/day cap. Firing a 21-symbol loop with no
+# pacing gets the second request refused outright.
+_MIN_INTERVAL = 1.2
+_RETRY_BACKOFF = (5, 15)
+_last_call = 0.0
 
 
 class QuotaExhausted(RuntimeError):
@@ -69,20 +77,47 @@ def _api_key() -> str:
     return key
 
 
-def _payload(session: requests.Session, params: Dict[str, str], budget: Budget) -> Dict[str, Any]:
-    budget.take()
-    params = {**params, "apikey": _api_key()}
-    resp = session.get(BASE_URL, params=params, timeout=TIMEOUT)
-    resp.raise_for_status()
-    body = resp.json()
+def _pace() -> None:
+    global _last_call
+    wait = _MIN_INTERVAL - (time.monotonic() - _last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_call = time.monotonic()
 
-    # The quota and error paths both return 200. Surface them as exceptions so
-    # a caller cannot mistake them for an empty-but-valid series.
-    if "Note" in body or "Information" in body:
-        raise QuotaExhausted(str(body.get("Note") or body.get("Information"))[:300])
-    if "Error Message" in body:
-        raise RuntimeError(str(body["Error Message"])[:300])
-    return body
+
+def _payload(session: requests.Session, params: Dict[str, str], budget: Budget) -> Dict[str, Any]:
+    """One request, paced and retried.
+
+    Alpha Vantage answers both the per-second throttle and the daily cap with
+    **HTTP 200** and a `Note`/`Information` key instead of data, and the two
+    messages are not reliably distinguishable -- the throttle message quotes
+    the daily limit too. So a refusal is retried with backoff, and only
+    treated as the day being over once the retries are also refused. A caller
+    that only checked status codes would publish empty files and report
+    success.
+    """
+    params = {**params, "apikey": _api_key()}
+    refusal = ""
+
+    for attempt in range(len(_RETRY_BACKOFF) + 1):
+        budget.take()
+        _pace()
+        resp = session.get(BASE_URL, params=params, timeout=TIMEOUT)
+        resp.raise_for_status()
+        body = resp.json()
+
+        if "Error Message" in body:
+            # A bad symbol. Retrying will not help.
+            raise RuntimeError(str(body["Error Message"])[:300])
+
+        if "Note" not in body and "Information" not in body:
+            return body
+
+        refusal = str(body.get("Note") or body.get("Information"))[:300]
+        if attempt < len(_RETRY_BACKOFF):
+            time.sleep(_RETRY_BACKOFF[attempt])
+
+    raise QuotaExhausted(refusal)
 
 
 def _series(body: Dict[str, Any], key_fragment: str) -> Dict[str, Dict[str, str]]:

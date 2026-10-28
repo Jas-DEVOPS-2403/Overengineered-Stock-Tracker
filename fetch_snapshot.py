@@ -348,7 +348,20 @@ def main() -> int:
     load_env()
     # Weekday vs weekend is decided in US Eastern terms, because that is what
     # "a trading day" means; a UTC-evening run is still the same session.
-    now_et = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=5)
+    #
+    # zoneinfo needs the IANA database, which Linux has and Windows does not
+    # unless `tzdata` is installed. Rather than take a dependency for this,
+    # fall back to a fixed -5. That is EST, so it is an hour off during EDT --
+    # harmless at this schedule, since 23:00 UTC is 18:00 or 19:00 ET and the
+    # calendar day is the same either way. It would matter if the cron moved
+    # near a midnight boundary.
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    except Exception:  # noqa: BLE001 - no tzdata available
+        now_et = now_utc - dt.timedelta(hours=5)
     weekday = now_et.weekday()  # Mon=0 .. Sun=6
     forced = os.getenv("PETRA_FORCE_MODE", "").strip().lower()
 
