@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .env
 .env.local
+
+# Published data lives on the orphan `data` branch, not on main.
+data/
+web/data/
+_site/

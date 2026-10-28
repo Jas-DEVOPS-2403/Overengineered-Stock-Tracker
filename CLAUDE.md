@@ -1,135 +1,117 @@
-# CLAUDE.md — Overengineered Stock Tracker
+# CLAUDE.md — Petra
 
-Personal observability learning project. Fetches stock quotes, exposes
-Prometheus metrics, and pushes them to Grafana Cloud. Intentionally
-overengineered for the sake of learning the full observability stack.
+End-of-day market watchlist. A daily GitHub Actions job writes five small JSON
+files and publishes them with a static page to GitHub Pages. No server, no
+database, no key in the browser.
 
 ## Architecture
 
 ```
-GitHub Actions (*/15 * * * *)
-  → fetch_snapshot.py       — calls Finnhub, writes snapshot.json
-  → push_metrics.py         — encodes snapshot as Prometheus remote_write,
-                               POSTs directly to Grafana Cloud
-  → commit snapshot.json    — so Render /metrics stays fresh
+GitHub Actions (0 23 * * *)
+  weekdays  -> Alpha Vantage TIME_SERIES_DAILY        x21 symbols
+            -> SEC EDGAR filings                      x18 tickers
+            -> latest.json, daily.json, filings.json
+  weekends  -> Alpha Vantage TIME_SERIES_WEEKLY_ADJ   x~11 symbols
+            -> SEC EDGAR companyfacts                 x~9 tickers
+            -> weekly.json, meta.json
 
-Render (FastAPI, free tier)
-  → GET /metrics            — serves snapshot.json in Prometheus text format
-  → GET /healthz            — health check
-
-Grafana Cloud
-  → receives remote_write pushes from GitHub Actions
-  → dashboards read from hosted Prometheus
+  -> data/ pushed to orphan `data` branch (single commit, force-pushed)
+  -> _site = web/ + data/ uploaded as a Pages artifact
+  -> GitHub Pages serves the page, which fetches its own JSON
 ```
 
-Alloy (`alloy/`) is kept as reference but is **not deployed** — the
-direct-push approach from GitHub Actions is simpler and does not require
-an always-on container.
+`fetch_snapshot.py` decides weekday vs weekend from the date in US Eastern
+terms. `PETRA_FORCE_MODE=weekday|weekend` overrides it.
 
-## Key Files
+## Key files
 
 | File | Purpose |
 |---|---|
-| `fetch_snapshot.py` | Calls Finnhub API, writes `snapshot.json` |
-| `push_metrics.py` | Pushes `snapshot.json` to Grafana Cloud via remote_write |
-| `app/server.py` | FastAPI — `/metrics` and `/healthz` |
-| `app/exporters.py` | `snapshot.json` → Prometheus text format |
-| `app/stocks.py` | Finnhub quote fetching logic |
-| `app/config.py` | Ticker list and cache TTL |
-| `.github/workflows/snapshot.yml` | Cron: fetch → push → commit |
-| `alloy/config.alloy` | Alloy config (reference only, not deployed) |
-| `render.yaml` | Render deployment spec for the FastAPI service |
+| `fetch_snapshot.py` | Orchestrator: mode choice, state merge, all five outputs |
+| `app/alphavantage.py` | Daily/weekly series, request budget, quota detection |
+| `app/edgar.py` | CIK resolution, filings, XBRL shares and EPS |
+| `app/config.py` | Tracked symbols, names, sector map, limits |
+| `web/index.html` | Entire front end; React UMD from cdnjs, no build step |
+| `.github/workflows/publish.yml` | Fetch, push data branch, deploy Pages |
 
-## Environment Variables / Secrets
+## Things that will bite you
 
-Set these in **GitHub → Settings → Secrets and variables → Actions**:
+**Alpha Vantage signals quota exhaustion with HTTP 200.** The body carries a
+`Note` or `Information` key instead of data. `_payload` raises `QuotaExhausted`
+on that; never "fix" it by only checking status codes, or the job will publish
+empty files and call it success.
 
-| Secret | Description |
-|---|---|
-| `FINNHUB_API_KEY` | Free API key from finnhub.io |
-| `GRAFANA_REMOTE_WRITE_URL` | e.g. `https://prometheus-prod-37-prod-ap-southeast-1.grafana.net/api/prom/push` — visible in Grafana Cloud → Prometheus data source details |
-| `GRAFANA_CLOUD_PROM_USER` | Numeric user ID from the same data source page |
-| `GRAFANA_CLOUD_API_KEY` | Grafana Cloud API token with **MetricsPublisher** role |
+**The free tier is 25 requests/day and end-of-day only.** Weekday and weekend
+work are split precisely so they never contend for the same budget. Adding
+symbols past ~21 breaks that arithmetic unless the open-source/educational
+allowance has been granted. `config.AV_DAILY_BUDGET` is the hard guard.
 
-For local testing, copy `.env.example` to `.env` and fill in values.
+**`outputsize=full`, `TIME_SERIES_DAILY_ADJUSTED`, `OVERVIEW`, `NEWS_SENTIMENT`
+and every `INDEX_DATA` endpoint are premium.** Do not drift onto them.
 
-## Running Locally
+**SEC EDGAR requires a declared User-Agent** with a contact address, and caps
+at 10 requests/second. `SEC_CONTACT_EMAIL` supplies it; the address is not
+committed because this repo is public.
+
+**Use `companyfacts`, not `companyconcept`.** The per-concept endpoint returns
+200 with an empty unit list for some filers — Coca-Cola among them — while the
+same facts are present in `companyfacts`. One request instead of three, and it
+actually works.
+
+**Multi-class filers have no usable share count.** EDGAR reports shares
+outstanding per class with no usable class dimension, so Berkshire returns its
+Class A count (~941k) against a Class B price. `config.MULTI_CLASS` lists the
+affected tickers and they publish `mcap: null`. P/E is unaffected.
+
+**Old XBRL tags linger.** Companies migrate between tags and the abandoned one
+keeps returning its last values — Berkshire's 2013 EPS of 3035.0 would
+otherwise be divided into a $500 price. `_latest_annual` rejects facts older
+than two fiscal years.
+
+**Market cap must be re-derived every run.** It is shares x price, and the
+price changes daily while the share count refreshes weekly. `derive_valuations`
+runs on both paths; deriving only at the weekend would print a week-old cap
+beside a current price.
+
+**Scheduled workflows in public repos auto-disable after 60 days of repository
+inactivity**, and workflow runs do not count. The daily push to the `data`
+branch is what keeps the timer alive. This repo has already been bitten once.
+
+**Pages serves `cache-control: max-age=600` and it is not configurable.** The
+page cache-busts its fetches with an hour-granularity stamp.
+
+## Front end notes
+
+Ported from a design handoff (`Stock tracker dashboard design.zip`). The
+handoff's markup used a design-canvas template DSL (`sc-for`, `sc-if`,
+`style-hover`) compiled by its own `support.js`, which it states is **not part
+of the implementation** — so the markup was translated to `React.createElement`
+and `support.js` dropped. `renderVals()` kept its shape and name, and the pure
+helpers (`fmt`, `sp`, `cap`, `pts`, `ago`) carried over unchanged.
+
+Adaptations forced by end-of-day data:
+
+- The prototype's 2-second random walk is gone. Nothing polls.
+- The tile sparkline is ~25 **daily** closes, not intraday, plus an O/H/L/C bar
+  for the session the sparkline cannot show.
+- Range tabs are 5D/1M/3M (daily) and 1Y/5Y (weekly adjusted), not 1D–1Y.
+- "Live · h:mm:ss ET" became "Close of {date}".
+- The flash animation fires once on load for prices that changed since this
+  visitor's last look, rather than on a synthetic tick.
+- The news sidebar is SEC filings; form type is the category.
+
+Theme lives on `document.documentElement` (set before paint by an inline
+script) so `body` can follow `--bg` and light mode has no dark gutter.
+
+## Local run
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-export FINNHUB_API_KEY="..."
-python fetch_snapshot.py          # writes snapshot.json
-
-# Optional: push to Grafana Cloud
-export GRAFANA_REMOTE_WRITE_URL="..."
-export GRAFANA_CLOUD_PROM_USER="..."
-export GRAFANA_CLOUD_API_KEY="..."
-python push_metrics.py
-
-# Run the FastAPI server
-python main.py
-curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/metrics
+ALPHAVANTAGE_API_KEY=... SEC_CONTACT_EMAIL=you@example.com python fetch_snapshot.py
+mkdir -p web/data && cp data/*.json web/data/
+python -m http.server -d web 8137
 ```
 
-## How push_metrics.py Works
-
-`push_metrics.py` implements Prometheus
-[remote_write](https://prometheus.io/docs/concepts/remote_write_spec/) from
-scratch (no Alloy, no Pushgateway):
-
-1. Reads `snapshot.json`
-2. Builds a `WriteRequest` protobuf manually (no generated code — the schema
-   is simple enough to encode by hand with varint/length-delimited fields)
-3. Compresses with raw snappy (`snappy.raw_compress`, matching Go's
-   `snappy.Encode` used by the Prometheus client)
-4. POSTs to the Grafana Cloud endpoint with `Content-Type:
-   application/x-protobuf` and `Content-Encoding: snappy`
-
-Metrics pushed:
-- `stock_price{ticker="..."}` — last trade price
-- `stock_change_pct{ticker="..."}` — percentage change
-- `stock_fetch_success{ticker="..."}` — 1 if present in snapshot
-- `stock_fetch_latency_seconds` — total Finnhub fetch latency
-- `stock_data_asof_timestamp` — unix timestamp of snapshot
-
-## Grafana Cloud Setup (one-time)
-
-1. Go to **Grafana Cloud → your stack → Prometheus → Details**.
-2. Copy the **Remote Write URL**, **Username** (numeric), and generate an
-   **API token** with the `MetricsPublisher` role.
-3. Add all three as GitHub Secrets (see table above).
-4. In Grafana, add a dashboard or use Explore to query `stock_price{ticker="AAPL"}`.
-
-## Disabling / Killing Compute
-
-To stop all scheduled jobs:
-- **GitHub Actions**: go to the repo → Actions → "Update Snapshot" →
-  click the `...` menu → **Disable workflow**.
-- **Render**: go to your Render dashboard → select the service →
-  **Settings** → **Suspend** (or delete it entirely).
-
-Once disabled, no API calls are made and no metrics are pushed.
-
-## Render Deployment
-
-`render.yaml` defines the FastAPI web service. Render auto-deploys on
-every push to `main`. The free tier sleeps after 15 min of inactivity —
-that is fine because `/metrics` is only for manual inspection; actual
-metrics flow through the GitHub Actions push path.
-
-## Common Debug Commands
-
-```bash
-# Check what snapshot.json looks like right now
-cat snapshot.json | python -m json.tool
-
-# Manually trigger a push (after exporting env vars)
-python push_metrics.py
-
-# Hit the live Render endpoint
-curl https://overengineered-stock-tracker.onrender.com/healthz
-curl https://overengineered-stock-tracker.onrender.com/metrics
-```
+`data/` and `web/data/` are gitignored — published data lives on the `data`
+branch, and `main` holds source only.

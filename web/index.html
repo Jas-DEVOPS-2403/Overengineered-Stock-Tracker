@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Petra</title>
+<meta name="description" content="End-of-day watchlist dashboard. Prices from Alpha Vantage, filings from SEC EDGAR.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
+<style>
+/* Design tokens, carried over unchanged from the design handoff.
+   One change: the handoff hard-coded the dark background on <body> because
+   it was dark-only. Here the theme attribute lives on <html>, so body can
+   follow the token and light mode has no dark gutter on overscroll. */
+body{margin:0;background:var(--bg)}
+:root,[data-theme="light"]{--bg:oklch(0.975 0.004 85);--panel:oklch(0.995 0.002 85);--ink:oklch(0.22 0.01 85);--mute:oklch(0.5 0.01 85);--line:oklch(0.9 0.006 85);--soft:oklch(0.95 0.005 85);--up:oklch(0.55 0.13 155);--down:oklch(0.56 0.16 27);--upbg:oklch(0.62 0.13 155 / 0.13);--downbg:oklch(0.62 0.16 27 / 0.13);--shade:oklch(0.2 0.01 85 / 0.35)}
+[data-theme="dark"]{--bg:oklch(0.17 0.006 85);--panel:oklch(0.21 0.006 85);--ink:oklch(0.95 0.005 85);--mute:oklch(0.7 0.01 85);--line:oklch(0.3 0.006 85);--soft:oklch(0.25 0.006 85);--up:oklch(0.76 0.14 155);--down:oklch(0.73 0.15 27);--upbg:oklch(0.76 0.14 155 / 0.14);--downbg:oklch(0.73 0.15 27 / 0.14);--shade:oklch(0 0 0 / 0.55)}
+@keyframes tickerScroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+input::placeholder{color:var(--mute)}
+a{color:var(--ink)} a:hover{color:var(--mute)}
+
+/* The handoff expressed hover as a `style-hover` attribute, which its own
+   runtime compiled. Inline styles cannot carry pseudo-classes, so those
+   become real classes here. */
+.hoverable{transition:background .15s}
+.hoverable:hover{background:var(--soft)}
+.iconbtn:hover{background:var(--soft);color:var(--ink)}
+.addtile:hover{background:var(--soft);color:var(--ink)}
+</style>
+<script>
+// Apply the stored theme before first paint, so a light-mode visitor does
+// not get a dark flash while React boots.
+try {
+  var t = JSON.parse(localStorage.getItem("petra.theme") || '"dark"');
+  document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
+} catch (e) {
+  document.documentElement.setAttribute("data-theme", "dark");
+}
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+"use strict";
+const h = React.createElement;
+
+// ---------------------------------------------------------------------------
+// Formatters and the sparkline projection. Carried over from the design's
+// logic class unchanged -- these are pure and already correct.
+// ---------------------------------------------------------------------------
+const fmt = (n, d = 2) =>
+  (n === null || n === undefined || Number.isNaN(n))
+    ? "--"
+    : n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const sp = x => (x >= 0 ? "+" : "") + x.toFixed(2) + "%";
+const cap = b => (b === null || b === undefined) ? "--" : (b >= 1000 ? (b / 1000).toFixed(2) + "T" : b.toFixed(0) + "B");
+const vol = v => {
+  if (!v) return "--";
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return String(v);
+};
+function pts(arr, w, hgt, p, extra) {
+  const all = extra ? arr.concat(extra) : arr;
+  const mn = Math.min(...all), mx = Math.max(...all), r = mx - mn || 1;
+  const y = v => +(p + (hgt - 2 * p) * (1 - (v - mn) / r)).toFixed(1);
+  return {
+    pts: arr.map((v, i) => (arr.length === 1 ? w / 2 : (i / (arr.length - 1) * w)).toFixed(1) + "," + y(v)).join(" "),
+    y, mn, mx,
+  };
+}
+const ago = ms => {
+  const m = Math.max(1, Math.round(ms / 60000));
+  if (m < 60) return m + "m ago";
+  const hr = Math.round(m / 60);
+  return hr < 24 ? hr + "h ago" : Math.round(hr / 24) + "d ago";
+};
+const MONO = "'Geist Mono',monospace";
+
+// ---------------------------------------------------------------------------
+// Storage. Every read is wrapped: a private window, cleared site data or a
+// blocked-cookies setting all make these throw rather than return empty.
+// ---------------------------------------------------------------------------
+const K = {
+  visit: "petra.lastVisit",
+  list: "petra.watchlist",
+  theme: "petra.theme",
+  layout: "petra.layout",
+  seen: "petra.lastSeen",
+};
+const get = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch (e) { return fallback; }
+};
+const set = (key, value) => {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* non-fatal */ }
+};
+
+// ---------------------------------------------------------------------------
+// Data loading. Five static files, same origin, so no CORS and no key.
+// Pages serves `cache-control: max-age=600` and the header is not
+// configurable, so the date stamp is what makes a new publish visible.
+// ---------------------------------------------------------------------------
+const FILES = ["latest", "daily", "weekly", "meta", "filings"];
+
+async function loadData() {
+  const stamp = new Date().toISOString().slice(0, 13); // hour granularity
+  const results = await Promise.all(
+    FILES.map(name =>
+      fetch(`data/${name}.json?v=${stamp}`)
+        .then(r => (r.ok ? r.json() : null))
+        .catch(() => null)
+    )
+  );
+  const out = {};
+  FILES.forEach((name, i) => { out[name] = results[i] || {}; });
+  return out;
+}
+
+/** Pull one symbol's series out of the shared-axis form, dropping padding. */
+function series(block, symbol) {
+  const dates = block.dates || [];
+  const closes = (block.closes || {})[symbol] || [];
+  const out = [];
+  for (let i = 0; i < dates.length; i++) {
+    if (closes[i] !== null && closes[i] !== undefined) out.push([dates[i], closes[i]]);
+  }
+  return out;
+}
+
+/** Close at or before `when`, for the since-last-visit baseline. */
+function closeAt(points, when) {
+  let best = null;
+  for (const [date, close] of points) {
+    if (new Date(date + "T21:00:00Z").getTime() <= when) best = close;
+  }
+  return best;
+}
+
+/**
+ * JSON -> the view model the design's renderVals() expects.
+ * This is the single integration point between the data layer and the page.
+ */
+function buildStocks(data, lastVisit) {
+  const latest = data.latest.symbols || {};
+  const metas = data.meta.symbols || {};
+  const seen = get(K.seen, {});
+
+  return Object.keys(latest)
+    .filter(symbol => !(data.meta.proxies || []).includes(symbol))
+    .map(symbol => {
+      const row = latest[symbol] || {};
+      const meta = metas[symbol] || {};
+      const dailyPoints = series(data.daily, symbol);
+      const weeklyPoints = series(data.weekly, symbol);
+      const dailyCloses = dailyPoints.map(p => p[1]);
+      const weeklyCloses = weeklyPoints.map(p => p[1]);
+
+      // The baseline for "since your last visit". If the visit was during the
+      // same session we have data for, the previous close is the honest
+      // comparison -- otherwise every repeat visit would read +0.00%.
+      let base = closeAt(dailyPoints, lastVisit);
+      if (base === null) base = closeAt(weeklyPoints, lastVisit);
+      if (base === null || base === row.c) base = row.pc;
+
+      return {
+        t: symbol,
+        name: meta.name || symbol,
+        sector: meta.sector || "",
+        price: row.c,
+        prev: row.pc,
+        open: row.o,
+        high: row.h,
+        low: row.l,
+        volume: row.v,
+        stale: row.s === "stale",
+        asof: row.asof || "",
+        daily: dailyCloses,
+        weekly: weeklyCloses,
+        // Last ~25 sessions is the tile's trend line. There is no intraday
+        // series to draw: free Alpha Vantage data is end-of-day only.
+        spark: dailyCloses.slice(-25),
+        lo52: weeklyCloses.length ? Math.min(...weeklyCloses.slice(-52)) : null,
+        hi52: weeklyCloses.length ? Math.max(...weeklyCloses.slice(-52)) : null,
+        since: base,
+        mcap: meta.mcap,
+        pe: meta.pe,
+        epsFy: meta.eps_period,
+        // Flash marks what moved since this visitor last loaded the page.
+        moved: seen[symbol] !== undefined && seen[symbol] !== row.c
+          ? (row.c > seen[symbol] ? "up" : "down")
+          : null,
+      };
+    });
+}
+
+const RANGES = [
+  ["5D", "Past 5 days", s => s.daily.slice(-5)],
+  ["1M", "Past month", s => s.daily.slice(-22)],
+  ["3M", "Past 3 months", s => s.daily.slice(-66)],
+  ["1Y", "Past year", s => s.weekly.slice(-52)],
+  ["5Y", "Past 5 years", s => s.weekly],
+];
+
+// ---------------------------------------------------------------------------
+
+class App extends React.Component {
+  constructor(props) {
+    super(props);
+    this.searchRef = React.createRef();
+
+    const now = Date.now();
+    let visit = get(K.visit, null);
+    // A reload moments later should not reset the window to "nothing changed".
+    if (!visit || now - visit < 60000) visit = now - 19 * 3600000;
+
+    this.state = {
+      loading: true,
+      error: null,
+      data: null,
+      stocks: [],
+      hidden: get(K.list, null),
+      theme: get(K.theme, "dark"),
+      layout: get(K.layout, "1a"),
+      query: "",
+      focus: false,
+      openT: null,
+      range: "1M",
+      news: [],
+      lastVisit: visit,
+      now,
+      paused: false,
+    };
+  }
+
+  syncTheme() {
+    document.documentElement.setAttribute("data-theme", this.state.theme);
+  }
+
+  componentDidUpdate(_, prev) {
+    if (prev.theme !== this.state.theme) this.syncTheme();
+  }
+
+  componentDidMount() {
+    this.syncTheme();
+    set(K.visit, Date.now());
+    this.onKey = e => { if (e.key === "Escape") this.setState({ openT: null }); };
+    window.addEventListener("keydown", this.onKey);
+
+    loadData().then(data => {
+      if (!data.latest.symbols) {
+        this.setState({ loading: false, error: "No data published yet." });
+        return;
+      }
+      const stocks = buildStocks(data, this.state.lastVisit);
+      // Record what this visitor has now seen, so the next load can flash
+      // only what actually changed.
+      const seen = {};
+      stocks.forEach(s => { seen[s.t] = s.price; });
+      set(K.seen, seen);
+      this.setState({ loading: false, data, stocks, news: data.filings.items || [] });
+    }).catch(err => this.setState({ loading: false, error: String(err) }));
+  }
+
+  componentWillUnmount() { window.removeEventListener("keydown", this.onKey); }
+
+  visible() {
+    const hidden = this.state.hidden;
+    return hidden === null ? this.state.stocks : this.state.stocks.filter(s => !hidden.includes(s.t));
+  }
+
+  remove(t) {
+    const hidden = (this.state.hidden || []).concat([t]);
+    set(K.list, hidden);
+    this.setState(s => ({ hidden, openT: s.openT === t ? null : s.openT }));
+  }
+
+  add(t) {
+    const hidden = (this.state.hidden || []).filter(x => x !== t);
+    set(K.list, hidden);
+    this.setState({ hidden, query: "", focus: false });
+    if (this.searchRef.current) this.searchRef.current.blur();
+  }
+
+  rangeSeries(stock, label) {
+    const found = RANGES.find(r => r[0] === label) || RANGES[1];
+    return found[2](stock).filter(v => v !== null && v !== undefined);
+  }
+
+  // -------------------------------------------------------------------------
+  // View model. Structure and naming follow the handoff's renderVals().
+  // -------------------------------------------------------------------------
+  renderVals() {
+    const st = this.state;
+    const stocks = this.visible();
+    const B = st.layout === "1b";
+    const open = t => () => this.setState({ openT: t, range: "1M" });
+    const C = up => (up ? "var(--up)" : "var(--down)");
+    const lvD = new Date(st.lastVisit);
+    const lastShort = lvD.toLocaleString("en-US", { weekday: "short", hour: "numeric", minute: "2-digit" });
+    const lastLong = lvD.toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+    const rows = stocks.map(s => {
+      const chg = s.price - s.prev;
+      const pct = s.prev ? (chg / s.prev) * 100 : 0;
+      const sinceP = s.since ? ((s.price - s.since) / s.since) * 100 : 0;
+      return { s, chg, pct, since: sinceP };
+    });
+
+    const tiles = rows.map(({ s, chg, pct }) => {
+      const up = chg >= 0;
+      const p = s.spark.length ? pts(s.spark, 200, 44, 3, [s.prev]) : null;
+      // Today's session as an O/H/L/C bar. The sparkline is a multi-day
+      // trend, so without this the tile never shows the day itself.
+      const band = (s.high > s.low)
+        ? {
+            lo: 0, hi: 100,
+            openX: ((s.open - s.low) / (s.high - s.low)) * 100,
+            closeX: ((s.price - s.low) / (s.high - s.low)) * 100,
+          }
+        : null;
+      return {
+        t: s.t, name: s.name, stale: s.stale,
+        priceStr: fmt(s.price),
+        chgStr: (up ? "+" : "") + fmt(chg),
+        pctStr: sp(pct),
+        color: C(up),
+        chipBg: up ? "var(--upbg)" : "var(--downbg)",
+        points: p ? p.pts : "",
+        baseY: p ? p.y(s.prev) : 22,
+        band,
+        lowStr: fmt(s.low),
+        highStr: fmt(s.high),
+        mcap: cap(s.mcap),
+        pe: s.pe ? s.pe.toFixed(1) : "--",
+        flashBg: s.moved === "up" ? "var(--upbg)" : s.moved === "down" ? "var(--downbg)" : "transparent",
+        open: open(s.t),
+        remove: e => { e.stopPropagation(); this.remove(s.t); },
+      };
+    });
+
+    const byPct = [...rows].sort((a, b) => b.pct - a.pct);
+    const g = r => ({ t: r.s.t, pct: sp(r.pct), open: open(r.s.t) });
+    const movers = [...rows]
+      .sort((a, b) => Math.abs(b.since) - Math.abs(a.since))
+      .slice(0, 5)
+      .map(r => ({
+        t: r.s.t, from: fmt(r.s.since), to: fmt(r.s.price),
+        pct: sp(r.since), color: C(r.since >= 0), open: open(r.s.t),
+      }));
+    const avg = rows.length ? rows.reduce((a, r) => a + r.since, 0) / rows.length : 0;
+
+    // Index row. Percent change only, never a price level: SPY is about
+    // SPX/10 and DIA about DJI/100, so printing the ETF price under an index
+    // name would simply be wrong.
+    const latest = (st.data && st.data.latest.symbols) || {};
+    const proxies = (st.data && st.data.meta.proxies) || ["SPY", "QQQ", "DIA"];
+    const metas = (st.data && st.data.meta.symbols) || {};
+    const idx = proxies.filter(p => latest[p]).map(p => {
+      const row = latest[p];
+      const pct = row.pc ? ((row.c - row.pc) / row.pc) * 100 : 0;
+      const closes = st.data ? series(st.data.daily, p).map(x => x[1]).slice(-30) : [];
+      return {
+        name: (metas[p] && metas[p].name) || p,
+        pct: sp(pct), color: C(pct >= 0),
+        points: closes.length ? pts(closes, 60, 24, 2).pts : "",
+      };
+    });
+
+    const inList = new Set(stocks.map(s => s.t));
+    const news = st.news.filter(n => inList.has(n.t));
+    const newsList = news.map((n, i) => ({
+      key: n.t + n.date + i,
+      t: n.t, cat: n.form, head: n.title,
+      ago: ago(st.now - new Date(n.date + "T21:00:00Z").getTime()),
+      url: n.url,
+    }));
+
+    // Ticker banner: every row, with a filing slipped in after every third.
+    const items = [];
+    rows.forEach((r, i) => {
+      items.push({ k: "s" + r.s.t, r });
+      if (i % 3 === 2 && news.length) items.push({ k: "n" + i, n: news[((i / 3) | 0) % news.length] });
+    });
+    const mkItem = (x, pre) => x.r
+      ? h("span", { key: pre + x.k, style: { display: "inline-flex", gap: 8, alignItems: "baseline", padding: "0 20px", borderRight: "1px solid var(--line)", whiteSpace: "nowrap" } },
+          h("b", { style: { fontWeight: 600 } }, x.r.s.t),
+          h("span", null, fmt(x.r.s.price)),
+          h("span", { style: { color: C(x.r.since >= 0), fontWeight: 600 } },
+            (x.r.since >= 0 ? "▲ " : "▼ ") + Math.abs(x.r.since).toFixed(2) + "%"))
+      : h("span", { key: pre + x.k, style: { display: "inline-flex", gap: 8, padding: "0 20px", borderRight: "1px solid var(--line)", whiteSpace: "nowrap", fontFamily: "'Geist',sans-serif", fontSize: 13 } },
+          h("span", { style: { color: "var(--mute)", fontFamily: MONO, fontSize: 12 } }, x.n.t),
+          x.n.form + " · " + x.n.title);
+    const tickerTrack = items.length
+      ? h("div", { style: { display: "flex", width: "max-content", animation: `tickerScroll ${Math.max(30, items.length * 3.2)}s linear infinite`, animationPlayState: st.paused ? "paused" : "running" } },
+          [...items.map(x => mkItem(x, "a")), ...items.map(x => mkItem(x, "b"))])
+      : null;
+
+    // Search offers back anything the visitor has removed.
+    const q = st.query.trim().toLowerCase();
+    const sugs = this.state.stocks
+      .filter(s => !inList.has(s.t))
+      .filter(s => !q || s.t.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
+      .slice(0, 6)
+      .map(s => ({ t: s.t, name: s.name, price: fmt(s.price), add: e => { e.preventDefault(); this.add(s.t); } }));
+
+    let d = {};
+    const os = stocks.find(s => s.t === st.openT);
+    if (os) {
+      const ser = this.rangeSeries(os, st.range);
+      const p = ser.length ? pts(ser, 800, 240, 8) : null;
+      const first = ser.length ? ser[0] : os.prev;
+      const chg = os.price - first;
+      const pct = first ? (chg / first) * 100 : 0;
+      const up = chg >= 0;
+      const sinceP = os.since ? ((os.price - os.since) / os.since) * 100 : 0;
+      const expected = { "5D": 5, "1M": 22, "3M": 66, "1Y": 52, "5Y": 260 }[st.range];
+      d = {
+        t: os.t, name: os.name, sector: os.sector,
+        price: fmt(os.price), chg: (up ? "+" : "") + fmt(chg), pct: sp(pct),
+        color: C(up), fill: up ? "var(--upbg)" : "var(--downbg)",
+        points: p ? p.pts : "", area: p ? "0,240 " + p.pts + " 800,240" : "",
+        hi: p ? fmt(p.mx) : "--", lo: p ? fmt(p.mn) : "--",
+        rangeNote: (RANGES.find(r => r[0] === st.range) || RANGES[1])[1],
+        // Say how little data there is rather than stretching a few points
+        // across the full width as though the range were complete.
+        short: ser.length && ser.length < expected * 0.8 ? `${ser.length} points available` : "",
+        empty: !ser.length,
+        ranges: RANGES.map(([label]) => ({
+          label, pick: () => this.setState({ range: label }),
+          bg: label === st.range ? "var(--ink)" : "var(--soft)",
+          color: label === st.range ? "var(--bg)" : "var(--ink)",
+        })),
+        stats: [
+          ["Open", fmt(os.open)],
+          ["Prev close", fmt(os.prev)],
+          ["Day high", fmt(os.high)],
+          ["Day low", fmt(os.low)],
+          ["52-wk high", fmt(os.hi52)],
+          ["52-wk low", fmt(os.lo52)],
+          ["Volume", vol(os.volume)],
+          ["Market cap", cap(os.mcap)],
+          [os.epsFy ? `P/E (FY${String(os.epsFy).slice(-2)})` : "P/E (FY)", os.pe ? os.pe.toFixed(1) : "--"],
+          ["Since last visit", sp(sinceP), C(sinceP >= 0)],
+        ].map(([k, v, c]) => ({ k, v, color: c || "var(--ink)" })),
+        news: newsList.filter(n => n.t === os.t),
+        remove: () => this.remove(os.t),
+      };
+      d.noNews = !d.news.length;
+    }
+
+    return {
+      theme: st.theme,
+      themeLabel: st.theme === "dark" ? "Light mode" : "Dark mode",
+      toggleTheme: () => this.setState(s => {
+        const theme = s.theme === "dark" ? "light" : "dark";
+        set(K.theme, theme);
+        return { theme };
+      }),
+      layouts: [["1a", "1a · Highlights top"], ["1b", "1b · Side rail"]].map(([v, l]) => ({
+        label: l,
+        pick: () => { set(K.layout, v); this.setState({ layout: v }); },
+        bg: st.layout === v ? "var(--ink)" : "transparent",
+        color: st.layout === v ? "var(--bg)" : "var(--mute)",
+      })),
+      hlFlex: B ? "0 1 280px" : "1 1 100%",
+      hlDir: B ? "column" : "row",
+      cardFlex: B ? "0 0 auto" : "1 1 280px",
+      tileMin: B ? "260px" : "220px",
+      sparkH: B ? "56px" : "44px",
+      lastShort, lastLong,
+      asof: (st.data && st.data.latest.asof) || "",
+      staleCount: this.state.stocks.filter(s => s.stale).length,
+      tickerTrack,
+      pause: () => this.setState({ paused: true }),
+      resume: () => this.setState({ paused: false }),
+      idx,
+      gainers: byPct.slice(0, 3).map(g),
+      losers: byPct.slice(-3).reverse().map(g),
+      movers,
+      upCount: rows.filter(r => r.since >= 0).length + " of " + rows.length,
+      avgSince: sp(avg), avgColor: C(avg >= 0),
+      tiles, count: String(stocks.length),
+      newsList, newsCount: String(newsList.length),
+      query: st.query,
+      onQuery: e => this.setState({ query: e.target.value }),
+      onFocus: () => this.setState({ focus: true }),
+      onBlur: () => setTimeout(() => this.setState({ focus: false }), 120),
+      showSug: st.focus, sugs, noSug: st.focus && !sugs.length,
+      focusSearch: () => this.searchRef.current && this.searchRef.current.focus(),
+      hasOpen: !!os, d,
+      close: () => this.setState({ openT: null }),
+      stop: e => e.stopPropagation(),
+    };
+  }
+
+  render() {
+    if (this.state.loading || this.state.error) return this.renderShell();
+    const v = this.renderVals();
+    return h("div", { "data-theme": v.theme, style: { minHeight: "100vh", background: "var(--bg)", color: "var(--ink)", fontFamily: "'Geist',system-ui,sans-serif", fontSize: 14, WebkitFontSmoothing: "antialiased" } },
+      this.renderTicker(v), this.renderHeader(v),
+      h("main", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 56px", boxSizing: "border-box", display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12 } },
+        this.renderHighlights(v), this.renderTiles(v), this.renderNews(v)),
+      this.renderFooter(v),
+      v.hasOpen ? this.renderModal(v) : null);
+  }
+
+  /** Loading and hard-failure states, in the page's own shell. */
+  renderShell() {
+    const { loading, error } = this.state;
+    return h("div", { "data-theme": this.state.theme, style: { minHeight: "100vh", background: "var(--bg)", color: "var(--ink)", fontFamily: "'Geist',system-ui,sans-serif", display: "flex", alignItems: "center", justifyContent: "center", padding: 28 } },
+      h("div", { style: { textAlign: "center", maxWidth: 420 } },
+        h("div", { style: { fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em", marginBottom: 8 } }, "Petra"),
+        h("div", { style: { color: "var(--mute)", fontSize: 13, lineHeight: 1.5 } },
+          loading ? "Loading end-of-day data…"
+                  : (error || "No data published yet.") + " The scraper publishes once each weekday after the US close.")));
+  }
+
+  renderTicker(v) {
+    return h("div", { style: { display: "flex", alignItems: "stretch", height: 40, borderBottom: "1px solid var(--line)", background: "var(--panel)", fontFamily: MONO, fontSize: 12.5 } },
+      h("div", { style: { flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, padding: "0 16px", background: "var(--ink)", color: "var(--bg)", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase", fontSize: 11.5 } },
+        h("span", null, "Since " + v.lastShort)),
+      h("div", { onMouseEnter: v.pause, onMouseLeave: v.resume, style: { flex: "1 1 auto", overflow: "hidden", display: "flex", alignItems: "center", minWidth: 0 } }, v.tickerTrack));
+  }
+
+  renderHeader(v) {
+    return h("header", { style: { maxWidth: 1480, margin: "0 auto", padding: "20px 28px", display: "flex", flexWrap: "wrap", alignItems: "center", gap: "16px 20px", boxSizing: "border-box" } },
+      h("div", { style: { display: "flex", alignItems: "baseline", gap: 10 } },
+        h("div", { style: { fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" } }, "Petra"),
+        h("div", { style: { color: "var(--mute)", fontSize: 13 } }, "Watchlist")),
+      h("div", { style: { position: "relative", flex: "1 1 260px", maxWidth: 420 } },
+        h("input", {
+          ref: this.searchRef, value: v.query, onChange: v.onQuery, onFocus: v.onFocus, onBlur: v.onBlur,
+          placeholder: "Find a stock — search ticker or company",
+          style: { width: "100%", boxSizing: "border-box", height: 38, padding: "0 14px", borderRadius: 8, border: "1px solid var(--line)", background: "var(--panel)", color: "var(--ink)", font: "inherit" },
+        }),
+        v.showSug ? h("div", { style: { position: "absolute", top: 44, left: 0, right: 0, zIndex: 20, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 8, boxShadow: "0 12px 32px var(--shade)", overflow: "hidden" } },
+          v.sugs.map(g => h("div", { key: g.t, className: "hoverable", onMouseDown: g.add, style: { display: "grid", gridTemplateColumns: "64px 1fr auto auto", gap: 12, alignItems: "center", padding: "10px 14px", cursor: "pointer", borderBottom: "1px solid var(--line)" } },
+            h("span", { style: { fontFamily: MONO, fontWeight: 600 } }, g.t),
+            h("span", { style: { color: "var(--mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, g.name),
+            h("span", { style: { fontFamily: MONO } }, g.price),
+            h("span", { style: { fontSize: 12, fontWeight: 600 } }, "+ Add"))),
+          v.noSug ? h("div", { style: { padding: "12px 14px", color: "var(--mute)" } }, "Nothing else to add") : null) : null),
+      h("div", { style: { flex: "1 1 0" } }),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8, color: "var(--mute)", fontSize: 13 } },
+        h("span", { style: { width: 8, height: 8, borderRadius: "50%", background: "var(--mute)" } }),
+        // Not "Live": the data is end-of-day and the page must not imply a feed.
+        h("span", null, v.asof ? "Close of " + v.asof : "No session yet"),
+        v.staleCount ? h("span", { title: "Some symbols could not be refreshed on the last run", style: { color: "var(--down)" } }, `· ${v.staleCount} stale`) : null),
+      h("div", { style: { display: "flex", gap: 2, padding: 3, border: "1px solid var(--line)", borderRadius: 8, background: "var(--panel)" } },
+        v.layouts.map(l => h("button", { key: l.label, onClick: l.pick, style: { border: 0, borderRadius: 6, padding: "6px 10px", font: "inherit", fontSize: 12.5, cursor: "pointer", background: l.bg, color: l.color } }, l.label))),
+      h("button", { onClick: v.toggleTheme, style: { height: 36, padding: "0 12px", border: "1px solid var(--line)", borderRadius: 8, background: "var(--panel)", color: "var(--ink)", font: "inherit", fontSize: 12.5, cursor: "pointer" } }, v.themeLabel));
+  }
+
+  renderHighlights(v) {
+    const card = { flex: v.cardFlex, minWidth: 0, background: "var(--panel)", borderRight: "1px solid var(--line)", borderBottom: "1px solid var(--line)", padding: "14px 16px", boxSizing: "border-box" };
+    const title = { fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--mute)", marginBottom: 12 };
+    const pill = up => ({ display: "flex", justifyContent: "space-between", gap: 8, cursor: "pointer", padding: "6px 8px", borderRadius: 6, background: up ? "var(--upbg)" : "var(--downbg)" });
+
+    return h("section", { style: { flex: v.hlFlex, display: "flex", flexDirection: v.hlDir, flexWrap: "wrap", gap: 0, minWidth: 0, borderTop: "1px solid var(--line)", borderLeft: "1px solid var(--line)", borderRadius: 10, overflow: "hidden" } },
+      h("div", { style: card },
+        h("div", { style: title }, "Index proxies"),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: 12 } },
+          v.idx.map(x => h("div", { key: x.name, style: { display: "grid", gridTemplateColumns: "110px minmax(0,1fr) auto", gap: 12, alignItems: "center" } },
+            h("div", { style: { minWidth: 0, fontWeight: 600, fontSize: 13 } }, x.name),
+            h("svg", { viewBox: "0 0 60 24", preserveAspectRatio: "none", style: { width: "100%", height: 34, display: "block" } },
+              h("polyline", { points: x.points, fill: "none", stroke: x.color, strokeWidth: 1.5, vectorEffect: "non-scaling-stroke" })),
+            h("div", { style: { fontFamily: MONO, fontWeight: 600, color: x.color, minWidth: 58, textAlign: "right" } }, x.pct)))),
+        h("div", { style: { fontSize: 11.5, color: "var(--mute)", marginTop: 10, lineHeight: 1.4 } },
+          "ETFs stand in for the indices — percent change only, since an ETF's price is not the index level.")),
+
+      h("div", { style: card },
+        h("div", { style: title }, "Today in your list"),
+        h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 } },
+          h("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+            h("div", { style: { fontSize: 12, color: "var(--mute)" } }, "Top gainers"),
+            v.gainers.map(x => h("div", { key: x.t, onClick: x.open, style: pill(true) },
+              h("span", { style: { fontFamily: MONO, fontWeight: 600 } }, x.t),
+              h("span", { style: { fontFamily: MONO, color: "var(--up)", fontWeight: 600 } }, x.pct)))),
+          h("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+            h("div", { style: { fontSize: 12, color: "var(--mute)" } }, "Top losers"),
+            v.losers.map(x => h("div", { key: x.t, onClick: x.open, style: pill(false) },
+              h("span", { style: { fontFamily: MONO, fontWeight: 600 } }, x.t),
+              h("span", { style: { fontFamily: MONO, color: "var(--down)", fontWeight: 600 } }, x.pct)))))),
+
+      h("div", { style: card },
+        h("div", { style: title }, "Since your last visit"),
+        h("div", { style: { fontSize: 12.5, color: "var(--mute)", marginBottom: 12 } },
+          v.lastLong + " · " + v.upCount + " up · avg ",
+          h("span", { style: { fontFamily: MONO, color: v.avgColor } }, v.avgSince)),
+        h("div", { style: { display: "flex", flexDirection: "column", gap: 2 } },
+          v.movers.map(m => h("div", { key: m.t, onClick: m.open, style: { display: "grid", gridTemplateColumns: "52px minmax(0,1fr) auto", gap: 10, alignItems: "center", padding: "6px 0", cursor: "pointer", borderBottom: "1px solid var(--line)" } },
+            h("span", { style: { fontFamily: MONO, fontWeight: 600 } }, m.t),
+            h("span", { style: { fontFamily: MONO, fontSize: 12, color: "var(--mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, m.from + " → " + m.to),
+            h("span", { style: { fontFamily: MONO, fontWeight: 600, color: m.color } }, m.pct))))));
+  }
+
+  renderTiles(v) {
+    return h("section", { style: { flex: "1 1 520px", minWidth: 0 } },
+      h("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 12 } },
+        h("h2", { style: { margin: 0, fontSize: 16, fontWeight: 600 } }, "Watchlist ",
+          h("span", { style: { color: "var(--mute)", fontWeight: 400 } }, v.count)),
+        h("span", { style: { fontSize: 12, color: "var(--mute)" } }, "Dashed line = previous close · click a tile for details")),
+      h("div", { style: { display: "grid", gridTemplateColumns: `repeat(auto-fill,minmax(${v.tileMin},1fr))`, gap: 0, borderTop: "1px solid var(--line)", borderLeft: "1px solid var(--line)", borderRadius: 10, overflow: "hidden" } },
+        v.tiles.map(s => h("div", { key: s.t, className: "hoverable", onClick: s.open, style: { position: "relative", display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", background: "var(--panel)", borderRight: "1px solid var(--line)", borderBottom: "1px solid var(--line)", cursor: "pointer", minWidth: 0 } },
+          h("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 } },
+            h("div", { style: { minWidth: 0 } },
+              h("div", { style: { fontFamily: MONO, fontWeight: 600, fontSize: 14 } }, s.t,
+                s.stale ? h("span", { title: "Could not be refreshed on the last run", style: { color: "var(--mute)", fontWeight: 400, fontSize: 11, marginLeft: 6 } }, "stale") : null),
+              h("div", { style: { fontSize: 12, color: "var(--mute)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, s.name)),
+            h("button", { className: "iconbtn", onClick: s.remove, title: "Remove from watchlist", style: { flex: "0 0 auto", width: 24, height: 24, border: 0, borderRadius: 6, background: "transparent", color: "var(--mute)", cursor: "pointer", fontSize: 16, lineHeight: 1 } }, "×")),
+          h("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, flexWrap: "wrap" } },
+            h("span", { style: { fontFamily: MONO, fontSize: 22, fontWeight: 500, letterSpacing: "-0.02em", padding: "0 4px", marginLeft: -4, borderRadius: 4, background: s.flashBg, transition: "background .6s" } }, s.priceStr),
+            h("span", { style: { fontFamily: MONO, fontSize: 12, fontWeight: 600, padding: "3px 6px", borderRadius: 5, color: s.color, background: s.chipBg } }, s.chgStr + " (" + s.pctStr + ")")),
+          h("svg", { viewBox: "0 0 200 44", preserveAspectRatio: "none", style: { width: "100%", height: v.sparkH, display: "block" } },
+            h("line", { x1: 0, x2: 200, y1: s.baseY, y2: s.baseY, stroke: "var(--line)", strokeWidth: 1, strokeDasharray: "3 3", vectorEffect: "non-scaling-stroke" }),
+            h("polyline", { points: s.points, fill: "none", stroke: s.color, strokeWidth: 1.6, vectorEffect: "non-scaling-stroke" })),
+          // Today's open/high/low/close, which the multi-day sparkline cannot show.
+          s.band ? h("div", { title: "Today's range, with open and close marked" },
+            h("svg", { viewBox: "0 0 100 10", preserveAspectRatio: "none", style: { width: "100%", height: 10, display: "block" } },
+              h("line", { x1: 0, x2: 100, y1: 5, y2: 5, stroke: "var(--line)", strokeWidth: 2, vectorEffect: "non-scaling-stroke" }),
+              h("line", { x1: Math.min(s.band.openX, s.band.closeX), x2: Math.max(s.band.openX, s.band.closeX), y1: 5, y2: 5, stroke: s.color, strokeWidth: 4, vectorEffect: "non-scaling-stroke" }),
+              h("circle", { cx: s.band.closeX, cy: 5, r: 1.6, fill: s.color })),
+            h("div", { style: { display: "flex", justifyContent: "space-between", fontFamily: MONO, fontSize: 10.5, color: "var(--mute)", marginTop: 2 } },
+              h("span", null, "L " + s.lowStr),
+              h("span", null, "H " + s.highStr))) : null,
+          h("div", { style: { display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, color: "var(--mute)", borderTop: "1px solid var(--line)", paddingTop: 8 } },
+            h("span", null, "Mkt cap ", h("span", { style: { fontFamily: MONO, color: "var(--ink)" } }, s.mcap)),
+            h("span", null, "P/E ", h("span", { style: { fontFamily: MONO, color: "var(--ink)" } }, s.pe))))),
+        h("button", { className: "addtile", onClick: v.focusSearch, style: { minHeight: 160, border: 0, borderRight: "1px solid var(--line)", borderBottom: "1px solid var(--line)", background: "var(--panel)", color: "var(--mute)", font: "inherit", cursor: "pointer" } }, "+ Add stock")));
+  }
+
+  renderNews(v) {
+    return h("aside", { style: { flex: "0 1 320px", minWidth: 260, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 10, boxSizing: "border-box" } },
+      h("div", { style: { padding: "16px 18px 12px", borderBottom: "1px solid var(--line)" } },
+        h("div", { style: { fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--mute)" } }, "Recent filings"),
+        h("div", { style: { fontSize: 12.5, color: "var(--mute)", marginTop: 4 } }, v.newsCount + " on your watchlist")),
+      h("div", { style: { display: "flex", flexDirection: "column" } },
+        v.newsList.length ? v.newsList.map(n => h("a", { key: n.key, className: "hoverable", href: n.url, target: "_blank", rel: "noopener noreferrer", style: { display: "flex", flexDirection: "column", gap: 6, padding: "14px 18px", borderBottom: "1px solid var(--line)", cursor: "pointer", textDecoration: "none", color: "inherit" } },
+          h("div", { style: { display: "flex", alignItems: "center", gap: 8, fontSize: 11.5, color: "var(--mute)" } },
+            h("span", { style: { fontFamily: MONO, fontWeight: 600, color: "var(--ink)", padding: "1px 6px", border: "1px solid var(--line)", borderRadius: 4 } }, n.t),
+            h("span", null, n.cat), h("span", null, "·"), h("span", null, n.ago)),
+          h("div", { style: { fontSize: 13.5, lineHeight: 1.4 } }, n.head)))
+          : h("div", { style: { padding: "14px 18px", color: "var(--mute)", fontSize: 13 } }, "No recent filings.")));
+  }
+
+  renderFooter(v) {
+    const link = { color: "var(--mute)" };
+    return h("footer", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 40px", boxSizing: "border-box", fontSize: 12, color: "var(--mute)", lineHeight: 1.6 } },
+      h("div", null, "Price data provided by ",
+        h("a", { href: "https://www.alphavantage.co", target: "_blank", rel: "noopener noreferrer", style: link }, "Alpha Vantage"),
+        ". Filings and fundamentals from ",
+        h("a", { href: "https://www.sec.gov/edgar", target: "_blank", rel: "noopener noreferrer", style: link }, "SEC EDGAR"),
+        " (public domain)."),
+      h("div", null, "End-of-day data, refreshed once each weekday after the US close — not for trading. Market cap and P/E are derived from SEC XBRL filings; P/E is fiscal-year, not trailing twelve months."));
+  }
+
+  renderModal(v) {
+    const d = v.d;
+    return h("div", { onClick: v.close, style: { position: "fixed", inset: 0, zIndex: 50, background: "var(--shade)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "48px 20px", overflow: "auto", boxSizing: "border-box" } },
+      h("div", { onClick: v.stop, style: { width: "100%", maxWidth: 880, background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 14, boxShadow: "0 24px 64px var(--shade)", overflow: "hidden" } },
+        h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 16, padding: "22px 24px 0" } },
+          h("div", null,
+            h("div", { style: { display: "flex", alignItems: "baseline", gap: 10 } },
+              h("span", { style: { fontFamily: MONO, fontSize: 22, fontWeight: 600 } }, d.t),
+              h("span", { style: { fontSize: 15 } }, d.name)),
+            h("div", { style: { fontSize: 12.5, color: "var(--mute)", marginTop: 2 } }, d.sector)),
+          h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+            h("button", { onClick: d.remove, style: { height: 32, padding: "0 12px", border: "1px solid var(--line)", borderRadius: 8, background: "transparent", color: "var(--ink)", font: "inherit", fontSize: 12.5, cursor: "pointer" } }, "Remove from list"),
+            h("button", { onClick: v.close, style: { width: 32, height: 32, border: "1px solid var(--line)", borderRadius: 8, background: "transparent", color: "var(--ink)", fontSize: 16, cursor: "pointer" } }, "×"))),
+        h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 12, padding: "14px 24px 0" } },
+          h("span", { style: { fontFamily: MONO, fontSize: 36, fontWeight: 500, letterSpacing: "-0.02em" } }, d.price),
+          h("span", { style: { fontFamily: MONO, fontSize: 14, fontWeight: 600, color: d.color } }, d.chg + " (" + d.pct + ")"),
+          h("span", { style: { fontSize: 12.5, color: "var(--mute)" } }, d.rangeNote),
+          d.short ? h("span", { style: { fontSize: 12.5, color: "var(--mute)" } }, "· " + d.short) : null),
+        h("div", { style: { display: "flex", gap: 4, padding: "16px 24px 8px", flexWrap: "wrap" } },
+          d.ranges.map(r => h("button", { key: r.label, onClick: r.pick, style: { border: 0, borderRadius: 6, padding: "6px 12px", fontFamily: MONO, fontSize: 12, cursor: "pointer", background: r.bg, color: r.color } }, r.label))),
+        h("div", { style: { position: "relative", padding: "0 24px" } },
+          d.empty
+            ? h("div", { style: { height: 240, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--mute)", fontSize: 13 } }, "No history for this range yet.")
+            : h("svg", { viewBox: "0 0 800 240", preserveAspectRatio: "none", style: { width: "100%", height: 240, display: "block" } },
+                h("polygon", { points: d.area, fill: d.fill }),
+                h("polyline", { points: d.points, fill: "none", stroke: d.color, strokeWidth: 2, vectorEffect: "non-scaling-stroke" })),
+          d.empty ? null : h("div", { style: { position: "absolute", top: 2, right: 28, fontFamily: MONO, fontSize: 11, color: "var(--mute)" } }, d.hi),
+          d.empty ? null : h("div", { style: { position: "absolute", bottom: 2, right: 28, fontFamily: MONO, fontSize: 11, color: "var(--mute)" } }, d.lo)),
+        h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 1, background: "var(--line)", borderTop: "1px solid var(--line)", borderBottom: "1px solid var(--line)", marginTop: 16 } },
+          d.stats.map(k => h("div", { key: k.k, style: { background: "var(--panel)", padding: "12px 24px" } },
+            h("div", { style: { fontSize: 11.5, color: "var(--mute)" } }, k.k),
+            h("div", { style: { fontFamily: MONO, fontSize: 14, marginTop: 2, color: k.color } }, k.v)))),
+        h("div", { style: { padding: "18px 24px 22px" } },
+          h("div", { style: { fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--mute)", marginBottom: 8 } }, "Recent filings"),
+          d.news.map(n => h("a", { key: n.key, href: n.url, target: "_blank", rel: "noopener noreferrer", style: { display: "block", padding: "10px 0", borderBottom: "1px solid var(--line)", textDecoration: "none", color: "inherit" } },
+            h("div", { style: { fontSize: 11.5, color: "var(--mute)" } }, n.cat + " · " + n.ago),
+            h("div", { style: { fontSize: 14, marginTop: 3 } }, n.head))),
+          d.noNews ? h("div", { style: { color: "var(--mute)", fontSize: 13 } }, "No recent filings for this company.") : null)));
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>

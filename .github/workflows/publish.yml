@@ -1,0 +1,106 @@
+name: Publish Petra
+
+# Once a day, after the US close in both DST offsets (16:00 ET is 20:00 UTC
+# under EDT and 21:00 UTC under EST). Alpha Vantage's free tier is end-of-day
+# only, so running more often would fetch the same numbers and burn quota.
+#
+# Weekdays refresh daily bars and filings; weekends refresh the weekly series
+# and fundamentals. fetch_snapshot.py decides which from the date, so one
+# schedule covers both.
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Force weekday or weekend behaviour (blank = decide from the date)"
+        required: false
+        type: choice
+        default: ""
+        options: ["", "weekday", "weekend"]
+
+permissions:
+  contents: write   # push the data branch
+  pages: write      # deploy-pages
+  id-token: write   # deploy-pages OIDC
+
+# Deployments queue rather than cancel. GitHub keeps only one pending run per
+# group, so a third queued run drops the pending one -- at one run a day that
+# is not a concern, and a lost run costs nothing: every Alpha Vantage call
+# returns 100 days of history, so the next run heals the gap.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # All published state lives on an orphan `data` branch pinned at a
+      # single amended commit, so main never accumulates data commits and the
+      # repo does not grow. A missing branch is the first-run case.
+      - name: Fetch previous data
+        run: |
+          mkdir -p data
+          if git fetch --depth=1 origin data 2>/dev/null; then
+            git --work-tree=data checkout FETCH_HEAD -- . 2>/dev/null || true
+            echo "restored $(ls data | wc -l) file(s) from the data branch"
+          else
+            echo "no data branch yet; starting fresh"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Build data files
+        env:
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          SEC_CONTACT_EMAIL: ${{ secrets.SEC_CONTACT_EMAIL }}
+          PETRA_FORCE_MODE: ${{ inputs.mode }}
+        run: python fetch_snapshot.py
+
+      # Single-commit orphan branch: --force keeps it at exactly one commit,
+      # so old blobs become unreachable instead of piling up. This push is
+      # also what keeps the 60-day inactivity timer alive -- a public repo
+      # with no activity has its scheduled workflows disabled automatically,
+      # and workflow runs themselves do not count as activity.
+      - name: Save data branch
+        run: |
+          cd data
+          git init -q
+          git config user.email "petra-bot@users.noreply.github.com"
+          git config user.name "petra-bot"
+          git checkout -q -b data
+          git add -A
+          git commit -q -m "data: $(date -u +%Y-%m-%d)" || { echo "nothing changed"; exit 0; }
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          mkdir -p _site/data
+          cp data/*.json _site/data/ 2>/dev/null || true
+          ls -la _site _site/data
+
+      # enablement:true bootstraps Pages on the first run; without it
+      # deploy-pages fails with an opaque "Get Pages site failed".
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
