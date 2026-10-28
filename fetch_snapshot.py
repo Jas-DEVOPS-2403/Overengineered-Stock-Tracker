@@ -32,6 +32,28 @@ DATA_DIR = "data"
 SCHEMA = 1
 
 
+def load_env(path: str = ".env") -> None:
+    """Read a local .env into the environment, if one exists.
+
+    Deliberately hand-rolled rather than pulling in python-dotenv: this is
+    twelve lines against a dependency, and `requests` staying the only
+    runtime requirement is part of the point of this rewrite. Real
+    environment variables always win, which is what makes CI unaffected --
+    there is no .env in the runner.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
 # --------------------------------------------------------------------------
 # state
 # --------------------------------------------------------------------------
@@ -323,6 +345,7 @@ def resolve_ciks_cached(sec) -> Dict[str, str]:
 # --------------------------------------------------------------------------
 
 def main() -> int:
+    load_env()
     # Weekday vs weekend is decided in US Eastern terms, because that is what
     # "a trading day" means; a UTC-evening run is still the same session.
     now_et = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=5)

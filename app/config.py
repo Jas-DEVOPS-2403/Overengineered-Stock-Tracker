@@ -91,16 +91,17 @@ WEEKLY_POINTS = 260
 # address; undeclared clients get blocked. The address comes from the
 # environment rather than this file, because this repo is public and a
 # committed address is a spam magnet.
-SEC_CONTACT = os.getenv("SEC_CONTACT_EMAIL", "")
-
-
 def sec_user_agent() -> str:
-    if not SEC_CONTACT:
+    # Read at call time, not import time: the entry point loads .env after
+    # these modules are already imported, so a module-level constant would
+    # always capture the empty value.
+    contact = os.getenv("SEC_CONTACT_EMAIL", "").strip()
+    if not contact:
         raise RuntimeError(
             "SEC_CONTACT_EMAIL is not set. SEC EDGAR requires a contact "
             "address in the User-Agent header; see .env.example."
         )
-    return f"Petra market dashboard ({SEC_CONTACT})"
+    return f"Petra market dashboard ({contact})"
 
 
 def provider_symbol(ticker: str) -> str:
