@@ -118,7 +118,11 @@ The provider choice was then decided by licensing rather than features:
 - **Stooq** now answers scripted clients with a JavaScript proof-of-work
   challenge.
 - **Alpha Vantage's** terms contain no redistribution or display restriction at
-  all, and §2 affirmatively grants the right to display.
+  all. They do not *grant* public display either — §2 is a standard EULA clause
+  granting display of the software on devices you own or control, for personal
+  use. So public display is unaddressed rather than authorised, which is a
+  materially better position than an express prohibition, but it is not a
+  licence. Stated plainly here rather than overclaimed.
 - **SEC EDGAR** is public domain outright.
 
 Result:
@@ -171,9 +175,15 @@ change this design should not accept without rethinking the above.
 - **P/E is fiscal-year, not TTM.** It uses the latest 10-K EPS, and is labelled
   `P/E (FY25)` accordingly. A true trailing figure means summing four
   potentially restated quarters.
-- **Daily bars are as-traded.** Alpha Vantage's adjusted daily series is
-  premium, so a split inside the 100-day window leaves a step in the chart.
-  The weekly series is adjusted and does not.
+- **Daily bars are as-traded; weekly bars are adjusted.** Alpha Vantage's
+  adjusted *daily* series is premium, so a split inside the 100-day window
+  leaves a step in the chart. The weekly series is split- and
+  dividend-adjusted and does not. The consequence worth knowing: the 5D/1M/3M
+  tabs are **price return** while 1Y/5Y are **total return**, so the longer
+  windows include dividends and the shorter ones do not. Over five years that
+  gap is roughly 9-11% for a broad index — which is why any cross-asset
+  comparison built on this data must use the weekly series throughout rather
+  than mixing the two.
 - **The watchlist is per-browser.** It lives in `localStorage`; there are no
   accounts and no server to hold one.
 
