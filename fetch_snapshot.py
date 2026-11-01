@@ -138,6 +138,11 @@ def run_weekday(budget: av.Budget) -> None:
         change = last["c"] - prev_close
 
         symbols[symbol] = {
+            # Name and sector are static config, carried here rather than
+            # only in meta.json so the page can label every row even on a
+            # first run, or when the EDGAR half is unavailable.
+            "n": config.display_name(symbol),
+            "sec": config.sector(symbol),
             "c": round(last["c"], 4),
             "o": round(last["o"], 4),
             "h": round(last["h"], 4),
@@ -179,6 +184,10 @@ def run_weekday(budget: av.Budget) -> None:
             "generated": int(time.time()),
             "symbols": symbols,
             "stale": sorted(stale),
+            # The page must know which symbols are index proxies so they stay
+            # out of the watchlist. It cannot wait for meta.json, which only
+            # the weekend run writes.
+            "proxies": list(config.PROXIES),
         },
     )
     save("daily.json", to_series(daily_pairs, config.DAILY_POINTS))

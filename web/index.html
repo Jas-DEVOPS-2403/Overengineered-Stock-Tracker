@@ -110,7 +110,10 @@ const set = (key, value) => {
 const FILES = ["latest", "daily", "weekly", "meta", "filings"];
 
 async function loadData() {
-  const stamp = new Date().toISOString().slice(0, 13); // hour granularity
+  // Five-minute buckets. This has to sit BELOW Pages' own 600s max-age: an
+  // hour-granularity stamp would pin a stale copy in the browser for longer
+  // than the CDN would have, which is the opposite of the intent.
+  const stamp = Math.floor(Date.now() / 300000);
   const results = await Promise.all(
     FILES.map(name =>
       fetch(`data/${name}.json?v=${stamp}`)
@@ -152,8 +155,12 @@ function buildStocks(data, lastVisit) {
   const metas = data.meta.symbols || {};
   const seen = get(K.seen, {});
 
+  // Proxies come from latest.json, which every weekday run writes; meta.json
+  // is weekly and may not exist yet on a fresh deploy.
+  const proxies = data.latest.proxies || data.meta.proxies || [];
+
   return Object.keys(latest)
-    .filter(symbol => !(data.meta.proxies || []).includes(symbol))
+    .filter(symbol => !proxies.includes(symbol))
     .map(symbol => {
       const row = latest[symbol] || {};
       const meta = metas[symbol] || {};
@@ -171,8 +178,8 @@ function buildStocks(data, lastVisit) {
 
       return {
         t: symbol,
-        name: meta.name || symbol,
-        sector: meta.sector || "",
+        name: row.n || meta.name || symbol,
+        sector: row.sec || meta.sector || "",
         price: row.c,
         prev: row.pc,
         open: row.o,
@@ -360,14 +367,14 @@ class App extends React.Component {
     // SPX/10 and DIA about DJI/100, so printing the ETF price under an index
     // name would simply be wrong.
     const latest = (st.data && st.data.latest.symbols) || {};
-    const proxies = (st.data && st.data.meta.proxies) || ["SPY", "QQQ", "DIA"];
+    const proxies = (st.data && (st.data.latest.proxies || st.data.meta.proxies)) || ["SPY", "QQQ", "DIA"];
     const metas = (st.data && st.data.meta.symbols) || {};
     const idx = proxies.filter(p => latest[p]).map(p => {
       const row = latest[p];
       const pct = row.pc ? ((row.c - row.pc) / row.pc) * 100 : 0;
       const closes = st.data ? series(st.data.daily, p).map(x => x[1]).slice(-30) : [];
       return {
-        name: (metas[p] && metas[p].name) || p,
+        name: (latest[p] && latest[p].n) || (metas[p] && metas[p].name) || p,
         pct: sp(pct), color: C(pct >= 0),
         points: closes.length ? pts(closes, 60, 24, 2).pts : "",
       };
