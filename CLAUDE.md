@@ -80,6 +80,25 @@ branch is what keeps the timer alive. This repo has already been bitten once.
 **Pages serves `cache-control: max-age=600` and it is not configurable.** The
 page cache-busts its fetches with an hour-granularity stamp.
 
+**Cross-asset series refresh on a staleness rotation.** The equities take most
+of the 25/day budget, so `run_cross_asset` spends only what is left,
+oldest-first, with one request held in reserve. Each call returns a series'
+entire history, so a series refreshed three days ago is missing three points
+out of thousands -- that is why rotating is nearly free and must never compete
+with the equity refresh. A cold start fills over ~3 days, or in one go on the
+first weekend run, where ~14 requests are spare.
+
+**Raw cross-asset points live in `data/state/crossasset.json`,** which the site
+build does not copy (`cp data/*.json` does not match a subdirectory). It is the
+input to the weekly resample; publishing thousands of daily points per series
+to every visitor would be pointless.
+
+**Three cross-asset endpoints, three unrelated response shapes:**
+`DIGITAL_CURRENCY_DAILY` is a date-keyed dict, `GOLD_SILVER_HISTORY` is a list
+of `{date, price}` newest-first, and the EIA series are a list of
+`{date, value}` newest-first. The EIA ones write `"."` for a missing
+observation, which `float()` rejects.
+
 ## Front end notes
 
 Ported from a design handoff (`Stock tracker dashboard design.zip`). The

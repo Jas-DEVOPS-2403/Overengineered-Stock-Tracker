@@ -107,7 +107,31 @@ const set = (key, value) => {
 // Pages serves `cache-control: max-age=600` and the header is not
 // configurable, so the date stamp is what makes a new publish visible.
 // ---------------------------------------------------------------------------
-const FILES = ["latest", "daily", "weekly", "meta", "filings"];
+const FILES = ["latest", "daily", "weekly", "meta", "filings", "crossasset"];
+
+// Weeks shown per comparison window. Weekly bars, so 52 to the year.
+const CA_WINDOWS = [["1Y", 52], ["3Y", 156], ["5Y", 260]];
+
+/** Compound return, annualised volatility and worst peak-to-trough. */
+function stats(values) {
+  const v = values.filter(x => x !== null && x !== undefined);
+  if (v.length < 3) return null;
+  const rets = [];
+  for (let i = 1; i < v.length; i++) {
+    if (v[i - 1] > 0 && v[i] > 0) rets.push(v[i] / v[i - 1] - 1);
+  }
+  const mean = rets.reduce((a, b) => a + b, 0) / (rets.length || 1);
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1 || 1);
+  // Weekly bars throughout, so one annualisation factor for every asset
+  // class. Annualising crypto on 365 and equities on 252 is a ~20% error.
+  const vol = Math.sqrt(variance) * Math.sqrt(52);
+  let peak = v[0], dd = 0;
+  for (const x of v) {
+    if (x > peak) peak = x;
+    if (peak > 0) dd = Math.min(dd, x / peak - 1);
+  }
+  return { total: v[v.length - 1] / v[0] - 1, vol, dd };
+}
 
 async function loadData() {
   // Five-minute buckets. This has to sit BELOW Pages' own 600s max-age: an
@@ -239,6 +263,7 @@ class App extends React.Component {
       focus: false,
       openT: null,
       range: "1M",
+      caWindow: "5Y",
       news: [],
       lastVisit: visit,
       now,
@@ -504,6 +529,84 @@ class App extends React.Component {
       hasOpen: !!os, d,
       close: () => this.setState({ openT: null }),
       stop: e => e.stopPropagation(),
+      ca: this.crossAssetVals(),
+    };
+  }
+
+  /**
+   * The cross-asset comparison: equities, commodities and crypto rebased to
+   * 100 from a common start.
+   *
+   * Everything here is on one weekly grid, which is what makes the comparison
+   * defensible -- see the notes on the chart itself.
+   */
+  crossAssetVals() {
+    const block = (this.state.data && this.state.data.crossasset) || {};
+    const dates = block.dates || [];
+    const series = block.series || {};
+    if (!dates.length || !Object.keys(series).length) return null;
+
+    const weeks = (CA_WINDOWS.find(w => w[0] === this.state.caWindow) || CA_WINDOWS[2])[1];
+    const from = Math.max(0, dates.length - weeks);
+    const window = dates.slice(from);
+
+    const COLORS = { equity: "var(--up)", crypto: "var(--down)", commodity: "var(--mute)" };
+    const lines = [];
+    const refused = [];
+
+    Object.keys(series).sort().forEach(key => {
+      const row = series[key];
+      const slice = (row.values || []).slice(from);
+      const first = slice.find(x => x !== null && x !== undefined);
+      // A window containing zero or a negative price cannot be rebased: the
+      // sign flips and the percentage change divides through zero. WTI
+      // settled at -$37.63 on 2020-04-20, so this is a real case, not a
+      // hypothetical. Say so rather than drawing nonsense.
+      const low = Math.min(...slice.filter(x => x !== null && x !== undefined));
+      if (first === undefined || !(first > 0) || !(low > 0)) {
+        refused.push(row.name || key);
+        return;
+      }
+      const rebased = slice.map(x => (x === null || x === undefined ? null : (x / first) * 100));
+      lines.push({
+        key, name: row.name || key, klass: row.class || "equity",
+        color: COLORS[row.class] || "var(--ink)",
+        note: row.note || "", fred: !!row.fred,
+        values: rebased, stat: stats(slice),
+      });
+    });
+
+    if (!lines.length) return null;
+
+    // Log scale is not cosmetic once crypto is on the chart: on a linear
+    // axis a 20x move flattens a 2x move into a straight line, and equal
+    // vertical distances stop meaning equal percentage moves.
+    const all = lines.flatMap(l => l.values.filter(v => v !== null));
+    const lo = Math.min(...all), hi = Math.max(...all);
+    const project = v => Math.log(v);
+    const pLo = project(lo), pHi = project(hi), span = pHi - pLo || 1;
+    const W = 800, H = 260, pad = 6;
+    lines.forEach(line => {
+      const pts = [];
+      line.values.forEach((v, i) => {
+        if (v === null) return;
+        const x = (i / Math.max(1, line.values.length - 1)) * W;
+        const y = pad + (H - 2 * pad) * (1 - (project(v) - pLo) / span);
+        pts.push(x.toFixed(1) + "," + y.toFixed(1));
+      });
+      line.points = pts.join(" ");
+    });
+
+    return {
+      lines, refused,
+      from: window[0], to: window[window.length - 1],
+      windows: CA_WINDOWS.map(([label]) => ({
+        label,
+        pick: () => this.setState({ caWindow: label }),
+        bg: label === this.state.caWindow ? "var(--ink)" : "var(--soft)",
+        color: label === this.state.caWindow ? "var(--bg)" : "var(--ink)",
+      })),
+      fredNotice: lines.some(l => l.fred) ? block.fred_notice : "",
     };
   }
 
@@ -514,6 +617,7 @@ class App extends React.Component {
       this.renderTicker(v), this.renderHeader(v),
       h("main", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 56px", boxSizing: "border-box", display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12 } },
         this.renderHighlights(v), this.renderTiles(v), this.renderNews(v)),
+      this.renderCrossAsset(v),
       this.renderFooter(v),
       v.hasOpen ? this.renderModal(v) : null);
   }
@@ -655,6 +759,38 @@ class App extends React.Component {
             h("span", null, n.cat), h("span", null, "·"), h("span", null, n.ago)),
           h("div", { style: { fontSize: 13.5, lineHeight: 1.4 } }, n.head)))
           : h("div", { style: { padding: "14px 18px", color: "var(--mute)", fontSize: 13 } }, "No recent filings.")));
+  }
+
+  renderCrossAsset(v) {
+    const ca = v.ca;
+    if (!ca) return null;
+    const pct = x => (x >= 0 ? "+" : "") + (x * 100).toFixed(1) + "%";
+    return h("section", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 40px", boxSizing: "border-box" } },
+      h("div", { style: { background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 10, padding: "16px 18px" } },
+        h("div", { style: { display: "flex", flexWrap: "wrap", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 4 } },
+          h("div", { style: { fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--mute)" } }, "Across asset classes"),
+          h("div", { style: { display: "flex", gap: 4 } },
+            ca.windows.map(w => h("button", { key: w.label, onClick: w.pick, style: { border: 0, borderRadius: 6, padding: "4px 10px", fontFamily: MONO, fontSize: 12, cursor: "pointer", background: w.bg, color: w.color } }, w.label)))),
+        h("div", { style: { fontSize: 12.5, color: "var(--mute)", marginBottom: 12 } },
+          "Rebased to 100 at " + ca.from + ". Log scale, weekly closes."),
+        h("svg", { viewBox: "0 0 800 260", preserveAspectRatio: "none", style: { width: "100%", height: 260, display: "block" } },
+          ca.lines.map(l => h("polyline", { key: l.key, points: l.points, fill: "none", stroke: l.color, strokeWidth: 1.8, vectorEffect: "non-scaling-stroke" }))),
+        h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))", gap: "8px 16px", marginTop: 14 } },
+          ca.lines.map(l => h("div", { key: l.key, style: { display: "flex", flexDirection: "column", gap: 2, borderTop: "1px solid var(--line)", paddingTop: 8 } },
+            h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+              h("span", { style: { width: 10, height: 2, background: l.color, flex: "0 0 auto" } }),
+              h("span", { style: { fontWeight: 600, fontSize: 13 } }, l.name),
+              h("span", { style: { color: "var(--mute)", fontSize: 11.5 } }, l.klass)),
+            l.stat ? h("div", { style: { fontFamily: MONO, fontSize: 12, color: "var(--mute)" } },
+              h("span", { style: { color: l.stat.total >= 0 ? "var(--up)" : "var(--down)" } }, pct(l.stat.total)),
+              "  vol " + (l.stat.vol * 100).toFixed(0) + "%",
+              "  max dd " + pct(l.stat.dd)) : null,
+            l.note ? h("div", { style: { fontSize: 11, color: "var(--mute)", lineHeight: 1.35 } }, l.note) : null))),
+        h("div", { style: { fontSize: 11, color: "var(--mute)", marginTop: 14, lineHeight: 1.5, borderTop: "1px solid var(--line)", paddingTop: 10 } },
+          h("div", null, "Equity lines are total return (split- and dividend-adjusted); commodity lines are spot prices, which are not investable and include no carry. The two are not strictly commensurable — shown together because the relative shape is still informative, labelled so you can discount it."),
+          h("div", null, "All series are downsampled to one weekly grid rather than forward-filled, so crypto's 24/7 calendar does not insert zero-return days into the equity series. Volatility is annualised at √52 for every asset class."),
+          ca.refused.length ? h("div", { style: { color: "var(--down)" } }, "Not rebased in this window (price reached zero or below): " + ca.refused.join(", ")) : null,
+          ca.fredNotice ? h("div", null, ca.fredNotice) : null)));
   }
 
   renderFooter(v) {

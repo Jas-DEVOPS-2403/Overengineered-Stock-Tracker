@@ -48,6 +48,58 @@ PROXIES = {
     "DIA": "Dow 30 (DIA)",
 }
 
+# Cross-asset comparison series.
+#
+# Every one of these is free on Alpha Vantage, and each call returns the whole
+# history, so a series that is a few days stale loses nothing but its last
+# point. They are refreshed on a staleness rotation out of whatever request
+# budget the equities leave behind.
+#
+# Deliberately absent: the IMF-backed endpoints (COPPER, WHEAT, COFFEE and the
+# rest). They are monthly *period averages*, which cannot be joined to a daily
+# or weekly grid and whose averaging destroys realised volatility -- and the
+# underlying FRED series carry "Copyright (c) International Monetary Fund",
+# which FRED's own terms say requires the owner's permission for anything
+# beyond personal use. Not worth it for monthly data we could not plot.
+#
+# key -> (display name, asset class, unit, AV function, extra params, note)
+CROSS_ASSET = {
+    "BTC": ("Bitcoin", "crypto", "USD",
+            "DIGITAL_CURRENCY_DAILY", {"symbol": "BTC", "market": "USD"}, ""),
+    "ETH": ("Ethereum", "crypto", "USD",
+            "DIGITAL_CURRENCY_DAILY", {"symbol": "ETH", "market": "USD"}, ""),
+    "GOLD": ("Gold", "commodity", "USD/oz",
+             "GOLD_SILVER_HISTORY", {"symbol": "GOLD", "interval": "daily"},
+             "Spot price. Not an investable return -- no carry, no yield."),
+    "SILVER": ("Silver", "commodity", "USD/oz",
+               "GOLD_SILVER_HISTORY", {"symbol": "SILVER", "interval": "daily"},
+               "Spot price. Not an investable return -- no carry, no yield."),
+    "WTI": ("Crude oil (WTI)", "commodity", "USD/bbl",
+            "WTI", {"interval": "daily"},
+            "Cushing spot, EIA via FRED. Settled negative in April 2020."),
+    "BRENT": ("Crude oil (Brent)", "commodity", "USD/bbl",
+              "BRENT", {"interval": "daily"},
+              "Europe spot, EIA via FRED."),
+    "NATGAS": ("Natural gas", "commodity", "USD/MMBtu",
+               "NATURAL_GAS", {"interval": "daily"},
+               "Henry Hub spot, EIA via FRED."),
+}
+
+# Equities enter the comparison through the weekly ADJUSTED series we already
+# fetch, so they cost no extra requests -- and, being split- and
+# dividend-adjusted, they are a total-return series. Mixing a price-return
+# equity line with crypto understates equities by roughly 9-11% over five
+# years, which is the most common way these charts lie.
+CROSS_ASSET_EQUITIES = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq 100 (QQQ)"}
+
+# Endpoints sourced from FRED require this notice verbatim, and the page
+# carries it. Gold and silver do not come through FRED and are exempt.
+FRED_NOTICE = (
+    "This product uses the FRED® API but is not endorsed or certified by "
+    "the Federal Reserve Bank of St. Louis."
+)
+FRED_BACKED = {"WTI", "BRENT", "NATGAS"}
+
 # Symbols where Alpha Vantage's spelling differs from ours. Kept as a map
 # rather than inlined because providers disagree about class-share notation
 # (Finnhub wanted BRK.B where Alpha Vantage takes BRK-B).

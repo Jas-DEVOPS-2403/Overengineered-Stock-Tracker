@@ -23,12 +23,13 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app import alphavantage as av
 from app import config, edgar
 
 DATA_DIR = "data"
+RAW_CROSS = os.path.join("state", "crossasset.json")
 SCHEMA = 1
 
 
@@ -68,8 +69,8 @@ def load(name: str) -> Dict[str, Any]:
 
 
 def save(name: str, body: Dict[str, Any]) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
     path = os.path.join(DATA_DIR, name)
+    os.makedirs(os.path.dirname(path) or DATA_DIR, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         # Compact separators: every visitor downloads these files and
         # pretty-printing roughly doubles the payload for no benefit.
@@ -193,6 +194,7 @@ def run_weekday(budget: av.Budget) -> None:
     save("daily.json", to_series(daily_pairs, config.DAILY_POINTS))
     # Market cap tracks today's close, so re-derive it now that prices moved.
     derive_valuations()
+    run_cross_asset(budget)
     run_filings()
 
 
@@ -245,6 +247,7 @@ def run_weekend(budget: av.Budget, half: int) -> None:
     if weekly_pairs:
         save("weekly.json", to_series(weekly_pairs, config.WEEKLY_POINTS))
 
+    run_cross_asset(budget)
     run_fundamentals(half)
 
 
@@ -331,6 +334,130 @@ def derive_valuations() -> None:
     meta["symbols"] = symbols
     meta["proxies"] = list(config.PROXIES)
     save("meta.json", meta)
+
+
+# --------------------------------------------------------------------------
+# cross-asset comparison
+# --------------------------------------------------------------------------
+
+def weekly_grid() -> List[str]:
+    """The date axis every comparison series is resampled onto.
+
+    Alpha Vantage's weekly series is already Friday-dated, so reusing its
+    dates puts equities, crypto and commodities on one grid for free. That
+    sidesteps the calendar problem outright: crypto trades 365 days a year
+    and equities about 252, and the usual fix -- forward-filling equities
+    across weekends -- inserts zero-return days that deflate measured equity
+    volatility by roughly 17% and corrupt every correlation. Downsampling to
+    a weekly grid never invents a point.
+    """
+    dates = load("weekly.json").get("dates")
+    if dates:
+        return list(dates)
+    # No weekly equity data yet (first run is a weekday). Generate Fridays so
+    # the comparison still renders before the first weekend run.
+    today = dt.date.today()
+    friday = today - dt.timedelta(days=(today.weekday() - 4) % 7)
+    return sorted(
+        (friday - dt.timedelta(weeks=i)).isoformat()
+        for i in range(config.WEEKLY_POINTS)
+    )
+
+
+def resample(points: List[Tuple[str, float]], grid: List[str]) -> List[Optional[float]]:
+    """Last observation at or before each grid date; None before the series starts."""
+    out: List[Optional[float]] = []
+    i, last = 0, None
+    for date in grid:
+        while i < len(points) and points[i][0] <= date:
+            last = points[i][1]
+            i += 1
+        out.append(last)
+    return out
+
+
+def run_cross_asset(budget: av.Budget, reserve: int = 1) -> None:
+    """Refresh the stalest comparison series that the remaining budget allows.
+
+    The equities come first and take most of the day's 25 requests, so this
+    drains what is left, oldest-first. Each call returns a series' entire
+    history, so a series refreshed three days ago is missing three points out
+    of thousands -- which is why rotating is nearly free, and why this must
+    never compete with the equity refresh for budget.
+    """
+    # Raw daily points live under data/state/, which the site build does not
+    # copy -- thousands of daily points per series are the input to the
+    # resample, not something every visitor should download.
+    stored = load(RAW_CROSS)
+    series: Dict[str, Any] = stored.get("series", {})
+
+    spare = budget.limit - budget.spent - reserve
+    if spare <= 0:
+        print("  cross-asset: no budget left today, keeping stored series")
+    else:
+        order = sorted(config.CROSS_ASSET, key=lambda k: series.get(k, {}).get("updated", 0))
+        session = av.new_session()
+        for key in order[:spare]:
+            try:
+                points = av.fetch_cross_asset(key, session, budget)
+            except av.QuotaExhausted as exc:
+                print(f"  ! cross-asset quota exhausted before {key}: {exc}")
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! cross-asset {key}: {type(exc).__name__}: {exc}")
+                continue
+            name, klass, unit, _fn, _extra, note = config.CROSS_ASSET[key]
+            series[key] = {
+                "name": name, "class": klass, "unit": unit, "note": note,
+                "fred": key in config.FRED_BACKED,
+                "updated": int(time.time()),
+                "points": [[d, v] for d, v in points[-2000:]],
+            }
+
+    grid = weekly_grid()
+    out: Dict[str, Any] = {}
+
+    for key, row in series.items():
+        points = [(d, v) for d, v in row.get("points", [])]
+        values = resample(points, grid)
+        present = [v for v in values if v is not None]
+        out[key] = {
+            k: row[k] for k in ("name", "class", "unit", "note", "fred", "updated")
+            if k in row
+        }
+        out[key]["values"] = values
+        # A series that touched zero or below cannot be rebased to 100 -- the
+        # sign flips and percentage change divides through zero. WTI settled
+        # at -$37.63 on 2020-04-20, so this is not hypothetical. The page
+        # refuses to rebase such a window rather than drawing nonsense.
+        out[key]["min"] = min(present) if present else None
+
+    # Equities ride in from the weekly ADJUSTED series, so they cost nothing
+    # and are total return rather than price return.
+    weekly = load("weekly.json")
+    for symbol, label in config.CROSS_ASSET_EQUITIES.items():
+        closes = (weekly.get("closes") or {}).get(symbol)
+        if not closes:
+            continue
+        present = [v for v in closes if v is not None]
+        out[symbol] = {
+            "name": label, "class": "equity", "unit": "USD",
+            "note": "Total return: split- and dividend-adjusted.",
+            "fred": False, "updated": weekly.get("updated", 0),
+            "values": list(closes), "min": min(present) if present else None,
+        }
+
+    save(
+        "crossasset.json",
+        {
+            "schema": SCHEMA,
+            "updated": int(time.time()),
+            "dates": grid,
+            "series": out,
+            "fred_notice": config.FRED_NOTICE,
+        },
+    )
+    save(RAW_CROSS, {"schema": SCHEMA, "series": series})
 
 
 _cik_cache: Optional[Dict[str, str]] = None

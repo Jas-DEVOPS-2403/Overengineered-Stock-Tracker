@@ -167,6 +167,52 @@ def fetch_daily(symbol: str, session: requests.Session, budget: Budget) -> Dict[
     return {"symbol": symbol, "bars": bars}
 
 
+def fetch_cross_asset(key: str, session: requests.Session, budget: Budget) -> List[Tuple[str, float]]:
+    """One cross-asset series as [(date, value)], oldest first.
+
+    Three endpoints, three unrelated response shapes:
+
+      DIGITAL_CURRENCY_DAILY   {"Time Series (...)": {date: {"4. close": ...}}}
+      GOLD_SILVER_HISTORY      {"data": [{"date","price"}]}      newest first
+      WTI / BRENT / NATURAL_GAS {"data": [{"date","value"}]}      newest first
+
+    The FRED-backed ones use "." for a missing observation, which float()
+    will not take, and WTI genuinely went negative in April 2020 -- both are
+    passed through here and dealt with where it matters (see below).
+    """
+    name, _klass, _unit, function, extra, _note = config.CROSS_ASSET[key]
+    body = _payload(session, {"function": function, **extra}, budget)
+
+    points: List[Tuple[str, float]] = []
+
+    if function == "DIGITAL_CURRENCY_DAILY":
+        series = _series(body, "digital currency daily")
+        for date in sorted(series):
+            row = series[date]
+            close = row.get("4. close") or row.get("4a. close (USD)")
+            if close is not None:
+                points.append((date, float(close)))
+    else:
+        rows = body.get("data")
+        if not isinstance(rows, list):
+            raise RuntimeError(f"{key}: no data array; keys were {list(body)}")
+        field = "price" if function == "GOLD_SILVER_HISTORY" else "value"
+        for row in rows:
+            raw = str(row.get(field, "")).strip()
+            # FRED writes "." for a missing observation.
+            if not raw or raw == ".":
+                continue
+            try:
+                points.append((row["date"], float(raw)))
+            except (KeyError, ValueError):
+                continue
+        points.sort()
+
+    if not points:
+        raise RuntimeError(f"{key} ({name}): series was empty")
+    return points
+
+
 def fetch_weekly(symbol: str, session: requests.Session, budget: Budget) -> Dict[str, Any]:
     """Adjusted weekly closes, newest last, trimmed to WEEKLY_POINTS."""
     body = _payload(

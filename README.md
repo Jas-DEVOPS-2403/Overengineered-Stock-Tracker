@@ -138,6 +138,47 @@ Result:
   so a missed run heals itself on the next one.
 - Runtime dependencies went from six packages to one (`requests`).
 
+## Across asset classes
+
+A comparison panel rebases equities, commodities and crypto to 100 from a
+common start, on a log scale, with total return, annualised volatility and
+max drawdown per series.
+
+Most charts like this are quietly wrong. The specific traps, and what is done
+about each:
+
+- **Price return vs total return.** Dividends are roughly 9–11% cumulative for
+  a broad equity index over five years. Plotting price-return equities against
+  crypto understates equities by exactly that, every time. The equity lines
+  here come from the **weekly adjusted** series, so they are total return.
+- **Trading calendars.** Crypto runs 365 days a year, equities about 252. The
+  usual fix — forward-filling equities across weekends — inserts zero-return
+  days, which deflates measured equity volatility by about 17% and corrupts
+  every correlation. Everything is **downsampled to one weekly grid** instead,
+  which never invents a point. Volatility is annualised at √52 throughout;
+  mixing √252 and √365 is a ~20% error.
+- **Start date.** It dominates the conclusion. Bitcoin from November 2021 is
+  +20% with a 74% drawdown; from November 2025 it is −25%. Both are true, which
+  is why the window is **selectable** rather than fixed.
+- **Log scale.** Not cosmetic. On a linear axis a 20x crypto move flattens a 2x
+  equity move into a straight line.
+- **Spot is not an investable return.** Gold, silver and the oil/gas series are
+  spot prices — no carry, no yield, nobody earned them. They are labelled as
+  such on the chart rather than being silently mixed with total-return lines.
+- **Prices that reach zero.** WTI settled at **−$37.63** on 2020-04-20. Rebasing
+  across that is undefined, so any series whose window touches zero or below is
+  **excluded and named**, not plotted as nonsense.
+
+Deliberately excluded: Alpha Vantage's IMF-backed commodity endpoints (copper,
+wheat, coffee and the rest). They are monthly *period averages*, which cannot
+join a weekly grid and whose averaging destroys realised volatility — and the
+underlying FRED series carry an IMF copyright notice that requires permission
+for anything beyond personal use.
+
+The EIA-sourced series (WTI, Brent, natural gas) come through FRED, so the page
+carries the required notice: *"This product uses the FRED® API but is not
+endorsed or certified by the Federal Reserve Bank of St. Louis."*
+
 ## Cost safety
 
 Worth stating plainly, because it is a property of the design rather than a
