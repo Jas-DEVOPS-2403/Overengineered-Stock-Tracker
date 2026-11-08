@@ -192,6 +192,10 @@ def fetch_cross_asset(key: str, session: requests.Session, budget: Budget) -> Li
             close = row.get("4. close") or row.get("4a. close (USD)")
             if close is not None:
                 points.append((date, float(close)))
+    elif function == "TIME_SERIES_WEEKLY_ADJUSTED":
+        series = _series(body, "weekly adjusted")
+        for date in sorted(series):
+            points.append((date, float(series[date]["5. adjusted close"])))
     else:
         rows = body.get("data")
         if not isinstance(rows, list):

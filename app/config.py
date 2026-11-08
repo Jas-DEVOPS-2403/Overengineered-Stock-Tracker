@@ -13,19 +13,22 @@ import os
 # The page's search/add picks from this set, because a visitor can only be
 # shown data the scraper actually fetched. Widening this list is the one-line
 # change that follows Alpha Vantage granting the open-source request quota.
+# Sized to the request budget, not to taste. Each ticker costs one
+# TIME_SERIES_DAILY call per weekday, and the cross-asset comparison needs
+# seven slots out of the same 25. Thirteen plus three proxies leaves exactly
+# enough, with two held back for retries.
+#
+# Where the cut fell: every ticker from the original watchlist is kept, and
+# the five removed (AMD, NKE, SBUX, NFLX, DIS) were ones added later that
+# duplicated a sector already covered. Sector spread survives intact.
 TICKERS = {
     "AAPL":  ("Apple",                 "Technology"),
     "MSFT":  ("Microsoft",             "Technology"),
     "NVDA":  ("NVIDIA",                "Semiconductors"),
-    "AMD":   ("AMD",                   "Semiconductors"),
     "AMZN":  ("Amazon",                "Consumer Discretionary"),
     "TSLA":  ("Tesla",                 "Consumer Discretionary"),
-    "NKE":   ("Nike",                  "Consumer Discretionary"),
-    "SBUX":  ("Starbucks",             "Consumer Discretionary"),
     "GOOGL": ("Alphabet",              "Communication Services"),
     "META":  ("Meta Platforms",        "Communication Services"),
-    "NFLX":  ("Netflix",               "Communication Services"),
-    "DIS":   ("Disney",                "Communication Services"),
     "BRK-B": ("Berkshire Hathaway B",  "Financials"),
     "JPM":   ("JPMorgan Chase",        "Financials"),
     "V":     ("Visa",                  "Financials"),
@@ -83,6 +86,18 @@ CROSS_ASSET = {
     "NATGAS": ("Natural gas", "commodity", "USD/MMBtu",
                "NATURAL_GAS", {"interval": "daily"},
                "Henry Hub spot, EIA via FRED."),
+    # The equity benchmark belongs to this rotation, not to the weekend run.
+    # Deriving it from weekly.json meant the comparison had no equity line
+    # from Monday until the following Saturday -- a chart comparing asset
+    # classes with the main asset class missing. These use the ADJUSTED
+    # weekly series, so they are total return, which is what makes them
+    # comparable to anything else here.
+    "SPY": ("S&P 500 (SPY)", "equity", "USD",
+            "TIME_SERIES_WEEKLY_ADJUSTED", {"symbol": "SPY"},
+            "Total return: split- and dividend-adjusted."),
+    "QQQ": ("Nasdaq 100 (QQQ)", "equity", "USD",
+            "TIME_SERIES_WEEKLY_ADJUSTED", {"symbol": "QQQ"},
+            "Total return: split- and dividend-adjusted."),
 }
 
 # Equities enter the comparison through the weekly ADJUSTED series we already
@@ -91,6 +106,12 @@ CROSS_ASSET = {
 # equity line with crypto understates equities by roughly 9-11% over five
 # years, which is the most common way these charts lie.
 CROSS_ASSET_EQUITIES = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq 100 (QQQ)"}
+
+# A cross-asset series refreshed more recently than this is skipped, even
+# when budget is free. Each call returns the whole history, so refreshing
+# twice in a day buys one duplicate point; leaving the request unspent gives
+# the equity refresh headroom to retry through a throttle instead.
+CROSS_ASSET_MAX_AGE = 72 * 3600
 
 # Endpoints sourced from FRED require this notice verbatim, and the page
 # carries it. Gold and silver do not come through FRED and are exempt.

@@ -80,13 +80,20 @@ branch is what keeps the timer alive. This repo has already been bitten once.
 **Pages serves `cache-control: max-age=600` and it is not configurable.** The
 page cache-busts its fetches with an hour-granularity stamp.
 
-**Cross-asset series refresh on a staleness rotation.** The equities take most
-of the 25/day budget, so `run_cross_asset` spends only what is left,
-oldest-first, with one request held in reserve. Each call returns a series'
-entire history, so a series refreshed three days ago is missing three points
-out of thousands -- that is why rotating is nearly free and must never compete
-with the equity refresh. A cold start fills over ~3 days, or in one go on the
-first weekend run, where ~14 requests are spare.
+**Cross-asset series refresh on a staleness rotation.** `run_cross_asset`
+spends only what the equity refresh leaves, oldest-first, with two requests
+held in reserve. A series is skipped entirely unless it is older than
+`CROSS_ASSET_MAX_AGE` (72h), which matters because **the published grid is
+weekly**: refreshing an input more than once a week adds nothing but the
+current partial week. Nine series on a 72h cycle averages 3 requests/day
+against 16 for equities, so the day runs at ~19 of 25.
+
+**The equity benchmark is part of that rotation, not the weekend run.** It
+was briefly derived from `weekly.json`, which only the weekend path writes --
+so on any Monday the cross-asset chart had no equity line until the following
+Saturday, i.e. an asset-class comparison missing the main asset class. SPY and
+QQQ are now `TIME_SERIES_WEEKLY_ADJUSTED` entries in `CROSS_ASSET`, which also
+keeps them total return.
 
 **Raw cross-asset points live in `data/state/crossasset.json`,** which the site
 build does not copy (`cp data/*.json` does not match a subdirectory). It is the

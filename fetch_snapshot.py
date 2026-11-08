@@ -376,7 +376,7 @@ def resample(points: List[Tuple[str, float]], grid: List[str]) -> List[Optional[
     return out
 
 
-def run_cross_asset(budget: av.Budget, reserve: int = 1) -> None:
+def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
     """Refresh the stalest comparison series that the remaining budget allows.
 
     The equities come first and take most of the day's 25 requests, so this
@@ -395,7 +395,17 @@ def run_cross_asset(budget: av.Budget, reserve: int = 1) -> None:
     if spare <= 0:
         print("  cross-asset: no budget left today, keeping stored series")
     else:
-        order = sorted(config.CROSS_ASSET, key=lambda k: series.get(k, {}).get("updated", 0))
+        now = time.time()
+        # Only series that have actually gone stale. Once all seven are
+        # current the rotation spends nothing and the slack stays available
+        # to the equity refresh.
+        due = [
+            k for k in config.CROSS_ASSET
+            if now - series.get(k, {}).get("updated", 0) >= config.CROSS_ASSET_MAX_AGE
+        ]
+        order = sorted(due, key=lambda k: series.get(k, {}).get("updated", 0))
+        if not order:
+            print("  cross-asset: all series current, nothing to refresh")
         session = av.new_session()
         for key in order[:spare]:
             try:
@@ -431,21 +441,6 @@ def run_cross_asset(budget: av.Budget, reserve: int = 1) -> None:
         # at -$37.63 on 2020-04-20, so this is not hypothetical. The page
         # refuses to rebase such a window rather than drawing nonsense.
         out[key]["min"] = min(present) if present else None
-
-    # Equities ride in from the weekly ADJUSTED series, so they cost nothing
-    # and are total return rather than price return.
-    weekly = load("weekly.json")
-    for symbol, label in config.CROSS_ASSET_EQUITIES.items():
-        closes = (weekly.get("closes") or {}).get(symbol)
-        if not closes:
-            continue
-        present = [v for v in closes if v is not None]
-        out[symbol] = {
-            "name": label, "class": "equity", "unit": "USD",
-            "note": "Total return: split- and dividend-adjusted.",
-            "fred": False, "updated": weekly.get("updated", 0),
-            "values": list(closes), "min": min(present) if present else None,
-        }
 
     save(
         "crossasset.json",
