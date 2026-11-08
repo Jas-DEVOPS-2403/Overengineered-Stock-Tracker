@@ -23,7 +23,7 @@ Three things about this API that are easy to get wrong:
 
 import os
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import requests
 
@@ -85,7 +85,7 @@ def _pace() -> None:
     _last_call = time.monotonic()
 
 
-def _payload(session: requests.Session, params: Dict[str, str], budget: Budget) -> Dict[str, Any]:
+def _payload(session: requests.Session, params: dict[str, str], budget: Budget) -> dict[str, Any]:
     """One request, paced and retried.
 
     Alpha Vantage answers both the per-second throttle and the daily cap with
@@ -120,7 +120,7 @@ def _payload(session: requests.Session, params: Dict[str, str], budget: Budget) 
     raise QuotaExhausted(refusal)
 
 
-def _series(body: Dict[str, Any], key_fragment: str) -> Dict[str, Dict[str, str]]:
+def _series(body: dict[str, Any], key_fragment: str) -> dict[str, dict[str, str]]:
     """Pull the one time-series block out of a response.
 
     Alpha Vantage names it differently per endpoint ("Time Series (Daily)",
@@ -133,7 +133,7 @@ def _series(body: Dict[str, Any], key_fragment: str) -> Dict[str, Dict[str, str]
     raise RuntimeError(f"no time series in response; keys were {list(body)}")
 
 
-def fetch_daily(symbol: str, session: requests.Session, budget: Budget) -> Dict[str, Any]:
+def fetch_daily(symbol: str, session: requests.Session, budget: Budget) -> dict[str, Any]:
     """100 daily bars, newest last. The final bar is the latest close."""
     body = _payload(
         session,
@@ -147,7 +147,7 @@ def fetch_daily(symbol: str, session: requests.Session, budget: Budget) -> Dict[
     series = _series(body, "time series (daily)")
 
     dates = sorted(series)[-config.DAILY_POINTS:]
-    bars: List[Tuple[str, Dict[str, float]]] = []
+    bars: list[tuple[str, dict[str, float]]] = []
     for date in dates:
         row = series[date]
         bars.append(
@@ -167,7 +167,9 @@ def fetch_daily(symbol: str, session: requests.Session, budget: Budget) -> Dict[
     return {"symbol": symbol, "bars": bars}
 
 
-def fetch_cross_asset(key: str, session: requests.Session, budget: Budget) -> List[Tuple[str, float]]:
+def fetch_cross_asset(
+    key: str, session: requests.Session, budget: Budget
+) -> list[tuple[str, float]]:
     """One cross-asset series as [(date, value)], oldest first.
 
     Three endpoints, three unrelated response shapes:
@@ -183,7 +185,7 @@ def fetch_cross_asset(key: str, session: requests.Session, budget: Budget) -> Li
     name, _klass, _unit, function, extra, _note = config.CROSS_ASSET[key]
     body = _payload(session, {"function": function, **extra}, budget)
 
-    points: List[Tuple[str, float]] = []
+    points: list[tuple[str, float]] = []
 
     if function == "DIGITAL_CURRENCY_DAILY":
         series = _series(body, "digital currency daily")
@@ -217,7 +219,7 @@ def fetch_cross_asset(key: str, session: requests.Session, budget: Budget) -> Li
     return points
 
 
-def fetch_weekly(symbol: str, session: requests.Session, budget: Budget) -> Dict[str, Any]:
+def fetch_weekly(symbol: str, session: requests.Session, budget: Budget) -> dict[str, Any]:
     """Adjusted weekly closes, newest last, trimmed to WEEKLY_POINTS."""
     body = _payload(
         session,

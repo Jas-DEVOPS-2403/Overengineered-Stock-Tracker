@@ -228,6 +228,48 @@ change this design should not accept without rethinking the above.
 - **The watchlist is per-browser.** It lives in `localStorage`; there are no
   accounts and no server to hold one.
 
+## Tests and CI
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest
+```
+
+44 tests, all offline — both providers are faked, so the suite costs none of
+the 25-request daily budget and cannot be broken by a provider outage. CI runs
+`ruff` and `pytest` on every push and pull request.
+
+The suite is deliberately built around failures that actually happened rather
+than around coverage. Each of these is a test because it was once a bug:
+
+- Alpha Vantage answers both its per-second throttle and its exhausted daily
+  cap with **HTTP 200** and a `Note`/`Information` key. One test proves a
+  refusal is never mistaken for data; another proves a throttle is retried
+  rather than aborting the whole run.
+- Berkshire's abandoned XBRL tag still returns its **2013** Class A EPS of
+  3035.0, which against a Class B price gives a P/E of 0.16.
+- Multi-class filers report shares outstanding with no usable class
+  dimension, so they publish no market cap — but keep their P/E, EPS being
+  per-share already.
+- A symbol missing from one fetch must be **padded with null**, not closed up,
+  or index *i* stops meaning the same date for every series.
+- The EIA series write `"."` for a missing observation, and WTI genuinely went
+  negative in April 2020. Both must survive parsing.
+- Real environment variables must win over a local `.env`, or CI secrets get
+  silently overridden.
+
+There is also an arithmetic test asserting the daily request budget still
+fits, so adding a ticker without doing the maths fails CI rather than failing
+quietly at 23:00 UTC.
+
+**If the daily publish fails, it opens a GitHub issue** (one rolling issue,
+commented on rather than duplicated) with the run link and the likely causes.
+And once data falls more than four days behind, the page itself shows a
+banner saying so. This project spent seven months serving March data behind a
+workflow that had quietly disabled itself; both of those exist so that cannot
+happen silently again.
+
 ## Local run
 
 ```bash

@@ -23,7 +23,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app import alphavantage as av
 from app import config, edgar
@@ -59,7 +59,7 @@ def load_env(path: str = ".env") -> None:
 # state
 # --------------------------------------------------------------------------
 
-def load(name: str) -> Dict[str, Any]:
+def load(name: str) -> dict[str, Any]:
     path = os.path.join(DATA_DIR, name)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -68,7 +68,7 @@ def load(name: str) -> Dict[str, Any]:
         return {}
 
 
-def save(name: str, body: Dict[str, Any]) -> None:
+def save(name: str, body: dict[str, Any]) -> None:
     path = os.path.join(DATA_DIR, name)
     os.makedirs(os.path.dirname(path) or DATA_DIR, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -78,18 +78,18 @@ def save(name: str, body: Dict[str, Any]) -> None:
     print(f"  wrote {path} ({os.path.getsize(path):,} bytes)")
 
 
-def to_pairs(series: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+def to_pairs(series: dict[str, Any]) -> dict[str, dict[str, float]]:
     """Published {dates, closes} form -> {symbol: {date: close}} for merging."""
     dates = series.get("dates") or []
-    out: Dict[str, Dict[str, float]] = {}
+    out: dict[str, dict[str, float]] = {}
     for symbol, closes in (series.get("closes") or {}).items():
         out[symbol] = {
-            date: close for date, close in zip(dates, closes) if close is not None
+            date: close for date, close in zip(dates, closes, strict=False) if close is not None
         }
     return out
 
 
-def to_series(pairs: Dict[str, Dict[str, float]], keep: int) -> Dict[str, Any]:
+def to_series(pairs: dict[str, dict[str, float]], keep: int) -> dict[str, Any]:
     """{symbol: {date: close}} -> a shared date axis with aligned arrays.
 
     Symbols are aligned onto the union of dates and padded with null where a
@@ -117,8 +117,8 @@ def run_weekday(budget: av.Budget) -> None:
     prev_symbols = prev_latest.get("symbols", {})
     daily_pairs = to_pairs(load("daily.json"))
 
-    symbols: Dict[str, Any] = {}
-    stale: List[str] = []
+    symbols: dict[str, Any] = {}
+    stale: list[str] = []
     newest_date = ""
 
     for symbol in config.ALL_SYMBOLS:
@@ -207,7 +207,7 @@ def run_filings() -> None:
         return
 
     ciks = resolve_ciks_cached(sec)
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     for symbol in config.TICKERS:
         cik = ciks.get(symbol)
         if not cik:
@@ -242,7 +242,7 @@ def run_weekend(budget: av.Budget, half: int) -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"  ! {symbol}: {type(exc).__name__}: {exc}")
             continue
-        weekly_pairs[symbol] = dict(zip(result["dates"], result["closes"]))
+        weekly_pairs[symbol] = dict(zip(result["dates"], result["closes"], strict=True))
 
     if weekly_pairs:
         save("weekly.json", to_series(weekly_pairs, config.WEEKLY_POINTS))
@@ -260,11 +260,7 @@ def run_fundamentals(half: int) -> None:
         return
 
     ciks = resolve_ciks_cached(sec)
-    symbols: Dict[str, Any] = load("meta.json").get("symbols", {})
-    prices = {
-        symbol: row.get("c")
-        for symbol, row in (load("latest.json").get("symbols") or {}).items()
-    }
+    symbols: dict[str, Any] = load("meta.json").get("symbols", {})
 
     tickers = list(config.TICKERS)
     midpoint = (len(tickers) + 1) // 2
@@ -340,7 +336,7 @@ def derive_valuations() -> None:
 # cross-asset comparison
 # --------------------------------------------------------------------------
 
-def weekly_grid() -> List[str]:
+def weekly_grid() -> list[str]:
     """The date axis every comparison series is resampled onto.
 
     Alpha Vantage's weekly series is already Friday-dated, so reusing its
@@ -364,9 +360,9 @@ def weekly_grid() -> List[str]:
     )
 
 
-def resample(points: List[Tuple[str, float]], grid: List[str]) -> List[Optional[float]]:
+def resample(points: list[tuple[str, float]], grid: list[str]) -> list[float | None]:
     """Last observation at or before each grid date; None before the series starts."""
-    out: List[Optional[float]] = []
+    out: list[float | None] = []
     i, last = 0, None
     for date in grid:
         while i < len(points) and points[i][0] <= date:
@@ -389,7 +385,7 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
     # copy -- thousands of daily points per series are the input to the
     # resample, not something every visitor should download.
     stored = load(RAW_CROSS)
-    series: Dict[str, Any] = stored.get("series", {})
+    series: dict[str, Any] = stored.get("series", {})
 
     spare = budget.limit - budget.spent - reserve
     if spare <= 0:
@@ -425,7 +421,7 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
             }
 
     grid = weekly_grid()
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
 
     for key, row in series.items():
         points = [(d, v) for d, v in row.get("points", [])]
@@ -455,10 +451,10 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
     save(RAW_CROSS, {"schema": SCHEMA, "series": series})
 
 
-_cik_cache: Optional[Dict[str, str]] = None
+_cik_cache: dict[str, str] | None = None
 
 
-def resolve_ciks_cached(sec) -> Dict[str, str]:
+def resolve_ciks_cached(sec) -> dict[str, str]:
     """One ticker->CIK lookup per run, shared by filings and fundamentals."""
     global _cik_cache
     if _cik_cache is None:
@@ -486,7 +482,7 @@ def main() -> int:
     # harmless at this schedule, since 23:00 UTC is 18:00 or 19:00 ET and the
     # calendar day is the same either way. It would matter if the cron moved
     # near a midnight boundary.
-    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_utc = dt.datetime.now(dt.UTC)
     try:
         from zoneinfo import ZoneInfo
 

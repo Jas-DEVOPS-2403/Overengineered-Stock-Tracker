@@ -508,6 +508,16 @@ class App extends React.Component {
       sparkH: B ? "56px" : "44px",
       lastShort, lastLong,
       asof: (st.data && st.data.latest.asof) || "",
+      // A dead pipeline and a long weekend look identical to a visitor
+      // otherwise. This repo spent seven months serving March data behind a
+      // workflow that had silently disabled itself; four calendar days
+      // clears any holiday weekend without crying wolf.
+      staleDays: (() => {
+        const asof = st.data && st.data.latest.asof;
+        if (!asof) return 0;
+        const days = (Date.now() - new Date(asof + "T21:00:00Z").getTime()) / 86400000;
+        return days > 4 ? Math.floor(days) : 0;
+      })(),
       staleCount: this.state.stocks.filter(s => s.stale).length,
       tickerTrack,
       pause: () => this.setState({ paused: true }),
@@ -614,7 +624,10 @@ class App extends React.Component {
     if (this.state.loading || this.state.error) return this.renderShell();
     const v = this.renderVals();
     return h("div", { "data-theme": v.theme, style: { minHeight: "100vh", background: "var(--bg)", color: "var(--ink)", fontFamily: "'Geist',system-ui,sans-serif", fontSize: 14, WebkitFontSmoothing: "antialiased" } },
-      this.renderTicker(v), this.renderHeader(v),
+      this.renderTicker(v),
+      v.staleDays ? h("div", { role: "status", style: { background: "var(--downbg)", color: "var(--down)", borderBottom: "1px solid var(--line)", padding: "10px 28px", fontSize: 13, textAlign: "center" } },
+        `Data is ${v.staleDays} days old — the daily publish has not run since ${v.asof}. Prices below are not current.`) : null,
+      this.renderHeader(v),
       h("main", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 56px", boxSizing: "border-box", display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12 } },
         this.renderHighlights(v), this.renderTiles(v), this.renderNews(v)),
       this.renderCrossAsset(v),

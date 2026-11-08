@@ -19,7 +19,7 @@ Endpoints used, all keyless:
 
 import datetime as dt
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import requests
 
@@ -60,7 +60,7 @@ def session() -> requests.Session:
     return s
 
 
-def _get(s: requests.Session, url: str) -> Optional[Any]:
+def _get(s: requests.Session, url: str) -> Any | None:
     """Paced GET. Returns None for a 404 so a missing filer is not fatal."""
     global _last_call
     wait = _MIN_INTERVAL - (time.monotonic() - _last_call)
@@ -75,7 +75,7 @@ def _get(s: requests.Session, url: str) -> Optional[Any]:
     return resp.json()
 
 
-def resolve_ciks(symbols: List[str], s: requests.Session) -> Dict[str, str]:
+def resolve_ciks(symbols: list[str], s: requests.Session) -> dict[str, str]:
     """Map our tickers to zero-padded 10-digit CIKs in one request."""
     body = _get(s, TICKER_MAP_URL) or {}
     # The file is {"0": {"cik_str": 320193, "ticker": "AAPL", ...}, ...}
@@ -93,7 +93,9 @@ def resolve_ciks(symbols: List[str], s: requests.Session) -> Dict[str, str]:
     return out
 
 
-def fetch_filings(symbol: str, cik: str, s: requests.Session, limit: int = 6) -> List[Dict[str, Any]]:
+def fetch_filings(
+    symbol: str, cik: str, s: requests.Session, limit: int = 6
+) -> list[dict[str, Any]]:
     """Recent interesting filings, newest first."""
     body = _get(s, SUBMISSIONS_URL.format(cik=cik))
     if not body:
@@ -105,7 +107,7 @@ def fetch_filings(symbol: str, cik: str, s: requests.Session, limit: int = 6) ->
     docs = recent.get("primaryDocument", [])
     accessions = recent.get("accessionNumber", [])
 
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for i, form in enumerate(forms):
         if form not in INTERESTING_FORMS:
             continue
@@ -143,8 +145,8 @@ def _title(description: str, form: str) -> str:
 
 
 def _latest_annual(
-    units: Dict[str, List[Dict[str, Any]]], max_age_years: int = 2
-) -> Optional[Dict[str, Any]]:
+    units: dict[str, list[dict[str, Any]]], max_age_years: int = 2
+) -> dict[str, Any] | None:
     """Most recent 10-K full-year datapoint from an XBRL concept's units.
 
     The age guard matters. Companies move between XBRL tags over the years, so
@@ -168,7 +170,7 @@ def _latest_annual(
     return best
 
 
-def _latest_any(units: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+def _latest_any(units: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
     best = None
     for facts in units.values():
         for fact in facts:
@@ -179,7 +181,7 @@ def _latest_any(units: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, An
     return best
 
 
-def fetch_fundamentals(symbol: str, cik: str, s: requests.Session) -> Dict[str, Any]:
+def fetch_fundamentals(symbol: str, cik: str, s: requests.Session) -> dict[str, Any]:
     """Shares outstanding and annual diluted EPS, from one companyfacts call.
 
     Market cap and P/E are derived from these by the orchestrator, which has
@@ -195,7 +197,7 @@ def fetch_fundamentals(symbol: str, cik: str, s: requests.Session) -> Dict[str, 
     run to several MB, which is why the session asks for gzip; fundamentals
     refresh weekly, so the volume is immaterial.
     """
-    out: Dict[str, Any] = {"shares": None, "eps": None, "eps_period": None}
+    out: dict[str, Any] = {"shares": None, "eps": None, "eps_period": None}
 
     body = _get(s, COMPANYFACTS_URL.format(cik=cik))
     if not body:
