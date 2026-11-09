@@ -193,3 +193,47 @@ def test_quotes_are_stripped(tmp_path, monkeypatch):
 
 def test_a_missing_env_file_is_not_an_error():
     fs.load_env("definitely-not-here.env")
+
+
+# ---------------------------------------------------------------------------
+# Empty-run guards
+#
+# Found in production: with no ALPHAVANTAGE_API_KEY in CI, every fetch on the
+# weekend path failed, each one was swallowed by the per-symbol except, and
+# the job exited 0 having published an empty file. A green build on a total
+# failure -- the exact silent death this project exists to avoid.
+# ---------------------------------------------------------------------------
+
+def test_weekend_refuses_to_report_success_having_fetched_nothing(tmp_path, monkeypatch):
+    import pytest
+
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="empty run"):
+        fs.run_weekend(av.Budget(25), half=0)
+
+
+def test_weekend_tolerates_a_bad_fetch_when_history_is_already_stored(tmp_path, monkeypatch):
+    # A transient failure must not trip the guard -- only a run that leaves
+    # nothing behind at all.
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    _write(tmp_path, "weekly.json", {"dates": ["2026-01-02"], "closes": {"SPY": [100.0]}})
+    monkeypatch.setattr(fs, "run_cross_asset", lambda *a, **k: None)
+    monkeypatch.setattr(fs, "run_fundamentals", lambda *a, **k: None)
+    fs.run_weekend(av.Budget(25), half=0)
+    assert (tmp_path / "weekly.json").exists()
+
+
+def test_main_fails_when_no_prices_survive(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PETRA_FORCE_MODE", "weekday")
+    monkeypatch.setattr(fs, "run_weekday", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="no usable latest.json"):
+        fs.main()

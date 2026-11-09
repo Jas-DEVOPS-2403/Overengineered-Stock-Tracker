@@ -93,8 +93,11 @@ jobs:
           cp data/*.json _site/data/ 2>/dev/null || true
           ls -la _site _site/data
 
-      # enablement:true bootstraps Pages on the first run; without it
-      # deploy-pages fails with an opaque "Get Pages site failed".
+      # Pages must be enabled by hand, once: Settings -> Pages -> Source:
+      # GitHub Actions. `enablement: true` is left on in case the token ever
+      # gains the permission, but it currently cannot create a Pages site --
+      # POST /repos/{owner}/{repo}/pages is refused with "Resource not
+      # accessible by integration", which is what five nightly runs failed on.
       - uses: actions/configure-pages@v5
         with:
           enablement: true
@@ -123,16 +126,41 @@ jobs:
             const title = 'Petra: the daily publish is failing';
             const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
                         `/actions/runs/${context.runId}`;
+            // Name the step that actually failed. The first version of this
+            // alert listed generic "likely causes" and every one of them was
+            // wrong for the real failure, which was Pages enablement. A list
+            // of guesses is worse than one fact.
+            let failed = '(could not determine)';
+            try {
+              const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner, repo: context.repo.repo,
+                run_id: context.payload.workflow_run?.id ?? context.runId,
+              });
+              const steps = jobs.jobs.flatMap(j =>
+                (j.steps || []).filter(s => s.conclusion === 'failure')
+                               .map(s => `${j.name} / ${s.name}`));
+              if (steps.length) failed = steps.join(', ');
+            } catch (e) {
+              failed = `(lookup failed: ${e.message})`;
+            }
+
             const body = [
               `The scheduled publish failed on ${new Date().toISOString().slice(0, 10)}.`,
               '',
+              `**Failing step:** ${failed}`,
               `Run: ${url}`,
               '',
-              'Likely causes, in rough order:',
-              '- Alpha Vantage daily quota exhausted (it answers HTTP 200 with a',
-              '  `Note`/`Information` key, so look for QuotaExhausted in the log).',
-              '- `ALPHAVANTAGE_API_KEY` or `SEC_CONTACT_EMAIL` missing or expired.',
-              '- SEC EDGAR rejecting an undeclared or malformed User-Agent.',
+              'Common causes by step:',
+              '- *Build data files* — `ALPHAVANTAGE_API_KEY` missing, or the daily',
+              '  quota is gone. Alpha Vantage answers both its throttle and its',
+              '  25/day cap with HTTP 200 and a `Note`/`Information` key, so look',
+              '  for `QuotaExhausted` rather than an HTTP error.',
+              '- *Configure/deploy Pages* — Pages is not enabled. The workflow',
+              '  token cannot create a Pages site (`Resource not accessible by',
+              '  integration`), so it must be turned on by hand once:',
+              '  **Settings → Pages → Source: GitHub Actions**.',
+              '- *Save data branch* — the `contents: write` permission or the',
+              '  branch itself is gone.',
               '',
               'The dashboard keeps serving the last good data until this is fixed;',
               'the page shows an explicit staleness warning once it falls behind.',

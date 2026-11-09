@@ -244,8 +244,17 @@ def run_weekend(budget: av.Budget, half: int) -> None:
             continue
         weekly_pairs[symbol] = dict(zip(result["dates"], result["closes"], strict=True))
 
-    if weekly_pairs:
-        save("weekly.json", to_series(weekly_pairs, config.WEEKLY_POINTS))
+    # The weekday path already refuses to publish an empty dashboard. This
+    # path had no equivalent, so with no credentials every fetch failed, the
+    # loop swallowed each one, nothing was written, and the step exited 0 --
+    # a green build on a total failure, which is the exact class of silent
+    # death this project is meant to have designed out.
+    if not weekly_pairs:
+        raise RuntimeError(
+            "no weekly series fetched and none stored; refusing to report "
+            "success on an empty run (is ALPHAVANTAGE_API_KEY set?)"
+        )
+    save("weekly.json", to_series(weekly_pairs, config.WEEKLY_POINTS))
 
     run_cross_asset(budget)
     run_fundamentals(half)
@@ -500,6 +509,16 @@ def main() -> int:
         run_weekend(budget, 0 if weekday == 5 else 1)
     else:
         run_weekday(budget)
+
+    # Last line of defence, whichever path ran. Either path can in principle
+    # swallow every individual failure and leave nothing behind; the page is
+    # unusable without latest.json, so a run that cannot produce or preserve
+    # one has failed regardless of what the individual steps reported.
+    if not load("latest.json").get("symbols"):
+        raise RuntimeError(
+            "no usable latest.json after the run -- the dashboard would have "
+            "no prices. Check that ALPHAVANTAGE_API_KEY is set."
+        )
 
     print(f"Done. Used {budget.spent} of {budget.limit} Alpha Vantage requests.")
     return 0
