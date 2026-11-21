@@ -340,9 +340,22 @@ ruff check .
 pytest
 ```
 
-54 tests, all offline — both providers are faked, so the suite costs none of
-the 25-request daily budget and cannot be broken by a provider outage. CI runs
-`ruff` and `pytest` on every push and pull request.
+73 tests, all offline — both providers are faked, so the suite costs none of
+the 25-request daily budget and cannot be broken by a provider outage. CI
+(`.github/workflows/ci.yml`) runs on every push to `main`, every pull request,
+and by hand, as two jobs:
+
+- **test** — `ruff`, then `pytest`. Besides the Python, the suite checks the
+  two things nothing else reads: the page's inline JavaScript is parsed with
+  `node --check` (it has no build step, so this is its compiler), and the
+  workflows' structure is checked against decisions already paid for — no
+  Pages deploy, `actions: read` on the alert job, no `|| true` on the state
+  restore, every action pinned to a version.
+- **workflows** — [actionlint](https://github.com/rhysd/actionlint), for
+  Actions syntax, expressions and the shell in `run:` steps.
+
+The syntax check needs `node` locally and is skipped without it; CI installs
+Node, and `pytest -rs` prints the reason for any skip.
 
 The suite is deliberately built around failures that actually happened rather
 than around coverage. Each of these is a test because it was once a bug:
@@ -366,6 +379,9 @@ than around coverage. Each of these is a test because it was once a bug:
 There is also an arithmetic test asserting the daily request budget still
 fits, so adding a ticker without doing the maths fails CI rather than failing
 quietly at 23:00 UTC.
+Adding a ticker without adding its exchange-qualified name to the intraday
+strip's `TV_SYMBOLS` map fails CI the same way, instead of the ticker
+quietly missing from the strip.
 
 **If the daily publish fails, it opens a GitHub issue** (one rolling issue,
 commented on rather than duplicated) with the run link and the likely causes.
