@@ -100,12 +100,17 @@ CROSS_ASSET = {
             "Total return: split- and dividend-adjusted."),
 }
 
-# Equities enter the comparison through the weekly ADJUSTED series we already
-# fetch, so they cost no extra requests -- and, being split- and
-# dividend-adjusted, they are a total-return series. Mixing a price-return
-# equity line with crypto understates equities by roughly 9-11% over five
-# years, which is the most common way these charts lie.
-CROSS_ASSET_EQUITIES = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq 100 (QQQ)"}
+# SPY and QQQ sit in PROXIES *and* in CROSS_ASSET, and the weekend run
+# fetches them for weekly.json as TIME_SERIES_WEEKLY_ADJUSTED -- the very
+# series CROSS_ASSET would ask for. Fetching them twice spent two of the
+# day's 25 requests on numbers already on disk, so the rotation reuses
+# weekly.json for these keys and only falls back to fetching when weekly.json
+# does not have them yet (a cold start, before the first weekend run).
+#
+# Being split- and dividend-adjusted, they are a total-return series. Mixing
+# a price-return equity line with crypto understates equities by roughly
+# 9-11% over five years, which is the most common way these charts lie.
+CROSS_ASSET_FROM_WEEKLY = ("SPY", "QQQ")
 
 # A cross-asset series refreshed more recently than this is skipped, even
 # when budget is free. Each call returns the whole history, so refreshing

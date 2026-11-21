@@ -1,8 +1,10 @@
 # CLAUDE.md — Petra
 
 End-of-day market watchlist. A daily GitHub Actions job writes five small JSON
-files and publishes them with a static page to GitHub Pages. No server, no
-database, no key in the browser.
+files to the `data` branch; a static page reads them. No server, no database,
+no key in the browser. The page is run locally and deliberately not hosted:
+public display is not clearly covered by Alpha Vantage's or TradingView's
+terms. Do not add a Pages deploy back without settling that first.
 
 ## Architecture
 
@@ -16,8 +18,8 @@ GitHub Actions (0 23 * * *)
             -> weekly.json, meta.json
 
   -> data/ pushed to orphan `data` branch (single commit, force-pushed)
-  -> _site = web/ + data/ uploaded as a Pages artifact
-  -> GitHub Pages serves the page, which fetches its own JSON
+
+Locally: data branch extracted to web/data/, page served from web/
 ```
 
 `fetch_snapshot.py` decides weekday vs weekend from the date in US Eastern
@@ -32,7 +34,7 @@ terms. `PETRA_FORCE_MODE=weekday|weekend` overrides it.
 | `app/edgar.py` | CIK resolution, filings, XBRL shares and EPS |
 | `app/config.py` | Tracked symbols, names, sector map, limits |
 | `web/index.html` | Entire front end; React UMD from cdnjs, no build step |
-| `.github/workflows/publish.yml` | Fetch, push data branch, deploy Pages |
+| `.github/workflows/publish.yml` | Fetch, push data branch, alert on failure |
 
 ## Things that will bite you
 
@@ -77,8 +79,9 @@ beside a current price.
 inactivity**, and workflow runs do not count. The daily push to the `data`
 branch is what keeps the timer alive. This repo has already been bitten once.
 
-**Pages serves `cache-control: max-age=600` and it is not configurable.** The
-page cache-busts its fetches with an hour-granularity stamp.
+**The page cache-busts its fetches** with a time-bucketed stamp. That was
+written for Pages' fixed `cache-control: max-age=600`; it is harmless locally
+and is kept so a future host does not serve stale JSON.
 
 **Cross-asset series refresh on a staleness rotation.** `run_cross_asset`
 spends only what the equity refresh leaves, oldest-first, with two requests
@@ -95,10 +98,9 @@ Saturday, i.e. an asset-class comparison missing the main asset class. SPY and
 QQQ are now `TIME_SERIES_WEEKLY_ADJUSTED` entries in `CROSS_ASSET`, which also
 keeps them total return.
 
-**Raw cross-asset points live in `data/state/crossasset.json`,** which the site
-build does not copy (`cp data/*.json` does not match a subdirectory). It is the
-input to the weekly resample; publishing thousands of daily points per series
-to every visitor would be pointless.
+**Raw cross-asset points live in `data/state/crossasset.json`,** which the page
+never fetches. It is the input to the weekly resample; shipping thousands of
+daily points per series to the browser would be pointless.
 
 **Three cross-asset endpoints, three unrelated response shapes:**
 `DIGITAL_CURRENCY_DAILY` is a date-keyed dict, `GOLD_SILVER_HISTORY` is a list
@@ -134,10 +136,19 @@ script) so `body` can follow `--bg` and light mode has no dark gutter.
 ```bash
 pip install -r requirements.txt
 
+# against the published data (no quota spent)
+git fetch origin data && mkdir -p web/data
+git archive -o data.tar FETCH_HEAD && tar -xf data.tar -C web/data && rm data.tar
+python -m http.server -d web 8137
+
+# or build it yourself (spends the day's quota)
 ALPHAVANTAGE_API_KEY=... SEC_CONTACT_EMAIL=you@example.com python fetch_snapshot.py
 mkdir -p web/data && cp data/*.json web/data/
-python -m http.server -d web 8137
 ```
+
+Never `git checkout FETCH_HEAD -- .` into `web/data` locally: it also stages
+the data files into `main`'s index. The workflow can do it because its
+checkout is thrown away.
 
 `data/` and `web/data/` are gitignored — published data lives on the `data`
 branch, and `main` holds source only.

@@ -204,6 +204,45 @@ def test_a_missing_env_file_is_not_an_error():
 # failure -- the exact silent death this project exists to avoid.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Empty-run guards
+#
+# Both fetch paths seed themselves from stored data before fetching, so a
+# guard written against "is there any data?" passes on a run where every
+# single fetch failed -- a green build on a total outage, which is the one
+# failure mode this project exists to rule out. The guards therefore count
+# what THIS run pulled off the wire. These tests pin both halves of that:
+# total failure must raise even when history is stored, and a partial
+# failure must not.
+# ---------------------------------------------------------------------------
+
+def _daily_payload(close=100.0):
+    return {
+        "Time Series (Daily)": {
+            "2026-01-02": {
+                "1. open": str(close), "2. high": str(close), "3. low": str(close),
+                "4. close": str(close), "5. volume": "1000",
+            }
+        }
+    }
+
+
+def _weekly_payload(close=100.0):
+    return {"Weekly Adjusted Time Series": {"2026-01-02": {"5. adjusted close": str(close)}}}
+
+
+def _fake_session(monkeypatch, payloads):
+    """Queue payloads for the next av.new_session(). Anything past the end of
+    the queue comes back as {}, which fails parsing -- i.e. a dead symbol."""
+    from conftest import FakeSession
+
+    from app import alphavantage as av
+
+    session = FakeSession(list(payloads))
+    monkeypatch.setattr(av, "new_session", lambda: session)
+    return session
+
+
 def test_weekend_refuses_to_report_success_having_fetched_nothing(tmp_path, monkeypatch):
     import pytest
 
@@ -211,13 +250,15 @@ def test_weekend_refuses_to_report_success_having_fetched_nothing(tmp_path, monk
 
     monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
     monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="empty run"):
+    with pytest.raises(RuntimeError, match="achieved nothing"):
         fs.run_weekend(av.Budget(25), half=0)
 
 
-def test_weekend_tolerates_a_bad_fetch_when_history_is_already_stored(tmp_path, monkeypatch):
-    # A transient failure must not trip the guard -- only a run that leaves
-    # nothing behind at all.
+def test_weekend_still_fails_when_every_fetch_fails_but_history_is_stored(tmp_path, monkeypatch):
+    # The regression this guard was rewritten for. Stored history used to
+    # satisfy it, so revoking the key on a Saturday produced a green run.
+    import pytest
+
     from app import alphavantage as av
 
     monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
@@ -225,8 +266,128 @@ def test_weekend_tolerates_a_bad_fetch_when_history_is_already_stored(tmp_path, 
     _write(tmp_path, "weekly.json", {"dates": ["2026-01-02"], "closes": {"SPY": [100.0]}})
     monkeypatch.setattr(fs, "run_cross_asset", lambda *a, **k: None)
     monkeypatch.setattr(fs, "run_fundamentals", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="achieved nothing"):
+        fs.run_weekend(av.Budget(25), half=0)
+
+
+def test_weekend_tolerates_a_partial_failure(tmp_path, monkeypatch):
+    # One good fetch among failures is a real run, and must not raise.
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fs, "run_cross_asset", lambda *a, **k: None)
+    monkeypatch.setattr(fs, "run_fundamentals", lambda *a, **k: None)
+    _fake_session(monkeypatch, [_weekly_payload()])
     fs.run_weekend(av.Budget(25), half=0)
-    assert (tmp_path / "weekly.json").exists()
+    assert json.loads((tmp_path / "weekly.json").read_text())["closes"]
+
+
+def test_weekday_still_fails_when_every_fetch_fails_but_prices_are_stored(tmp_path, monkeypatch):
+    # The same latent flaw on the weekday path: `symbols` is checked after
+    # the carry-forward loop has refilled it from yesterday's prices.
+    import pytest
+
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    _write(tmp_path, "latest.json", {"symbols": {"AAPL": {"c": 100.0, "s": "ok"}}})
+    with pytest.raises(RuntimeError, match="every price fetch failed"):
+        fs.run_weekday(av.Budget(25))
+
+
+def test_weekday_tolerates_a_partial_failure(tmp_path, monkeypatch):
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fs, "run_cross_asset", lambda *a, **k: None)
+    monkeypatch.setattr(fs, "run_filings", lambda *a, **k: None)
+    _fake_session(monkeypatch, [_daily_payload()])
+    fs.run_weekday(av.Budget(25))
+    assert json.loads((tmp_path / "latest.json").read_text())["symbols"]
+
+
+# ---------------------------------------------------------------------------
+# Cross-asset rotation: budget reserve, equity reuse, and failing loudly
+# ---------------------------------------------------------------------------
+
+def _stale_state(tmp_path, keys, updated=0):
+    _write(tmp_path, "state/crossasset.json",
+           {"series": {k: {"updated": updated, "points": []} for k in keys}})
+
+
+def test_cross_asset_raises_when_every_attempted_fetch_fails(tmp_path, monkeypatch):
+    # This rotation swallowed every per-series exception and returned
+    # normally, so a total provider outage was indistinguishable from
+    # "nothing was due".
+    import pytest
+
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="cross-asset fetch"):
+        fs.run_cross_asset(av.Budget(25))
+
+
+def test_cross_asset_is_quiet_when_nothing_is_due(tmp_path, monkeypatch):
+    # Nothing attempted is not a failure, so the guard must stay silent.
+    import time
+
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    _stale_state(tmp_path, config.CROSS_ASSET, updated=int(time.time()))
+    budget = av.Budget(25)
+    fs.run_cross_asset(budget)
+    assert budget.spent == 0
+
+
+def test_cross_asset_reuses_the_equity_proxies_from_weekly_json(tmp_path, monkeypatch):
+    # SPY and QQQ are in PROXIES and in CROSS_ASSET, and the weekend run
+    # already fetches exactly the adjusted weekly series this rotation wants.
+    # Fetching them again spent two of the day's 25 requests on nothing.
+    import time
+
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    _write(tmp_path, "weekly.json",
+           {"dates": ["2026-01-02"], "closes": {"SPY": [100.0], "QQQ": [200.0]}})
+    others = [k for k in config.CROSS_ASSET if k not in config.CROSS_ASSET_FROM_WEEKLY]
+    _stale_state(tmp_path, others, updated=int(time.time()))
+
+    budget = av.Budget(25)
+    fs.run_cross_asset(budget)
+
+    published = json.loads((tmp_path / "crossasset.json").read_text())["series"]
+    assert budget.spent == 0, "the proxies were refetched instead of reused"
+    for key in config.CROSS_ASSET_FROM_WEEKLY:
+        assert key in published
+        assert any(v is not None for v in published[key]["values"])
+
+
+def test_cross_asset_keeps_the_reserve_against_retries(tmp_path, monkeypatch):
+    # A refused call is retried twice, so one series can cost three requests.
+    # Sizing the loop at one request per series let the rotation eat the
+    # reserve that the equity refresh depends on.
+    from app import alphavantage as av
+
+    monkeypatch.setattr(fs, "DATA_DIR", str(tmp_path))
+    _stale_state(tmp_path, config.CROSS_ASSET, updated=0)
+    refusal = {"Note": "throttled"}
+    # Oldest-first, so the rotation reaches BTC and ETH: both are
+    # DIGITAL_CURRENCY_DAILY. Every series costs the full worst case here --
+    # two refusals, then data.
+    crypto = {"Time Series (Digital Currency Daily)": {"2026-01-02": {"4. close": "50000.0"}}}
+    _fake_session(monkeypatch, [refusal, refusal, crypto] * 8)
+
+    budget = av.Budget(9)
+    fs.run_cross_asset(budget, reserve=2)
+
+    assert budget.limit - budget.spent >= 2, (
+        f"spent {budget.spent} of {budget.limit}, leaving less than the reserve"
+    )
 
 
 def test_main_fails_when_no_prices_survive(tmp_path, monkeypatch):

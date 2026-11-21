@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Petra</title>
-<meta name="description" content="End-of-day watchlist dashboard. Prices from Alpha Vantage, filings from SEC EDGAR.">
+<meta name="description" content="End-of-day watchlist dashboard with a delayed intraday strip. Prices from Alpha Vantage, filings from SEC EDGAR, intraday quotes from TradingView.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap">
@@ -27,6 +27,16 @@ a{color:var(--ink)} a:hover{color:var(--mute)}
 .hoverable:hover{background:var(--soft)}
 .iconbtn:hover{background:var(--soft);color:var(--ink)}
 .addtile:hover{background:var(--soft);color:var(--ink)}
+
+/* Intraday band: label beside the strip on wide screens, above it on
+   phones, where a side label would squeeze the strip and clip TradingView's
+   attribution line. */
+.intraday{display:flex;align-items:stretch;border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+.intraday-label{flex:0 0 auto;display:flex;flex-direction:column;justify-content:center;gap:2px;padding:6px 14px;border-right:1px solid var(--line)}
+@media (max-width:640px){
+  .intraday{flex-direction:column}
+  .intraday-label{flex-direction:row;align-items:baseline;gap:10px;padding:7px 12px;border-right:0;border-bottom:1px solid var(--line)}
+}
 </style>
 <script>
 // Apply the stored theme before first paint, so a light-mode visitor does
@@ -217,6 +227,13 @@ function buildStocks(data, lastVisit) {
         // Last ~25 sessions is the tile's trend line. There is no intraday
         // series to draw: free Alpha Vantage data is end-of-day only.
         spark: dailyCloses.slice(-25),
+        // Marked "(adj.)" wherever these are shown, and deliberately so:
+        // they are the min and max of 52 *adjusted weekly closes*, sitting
+        // next to an as-traded price. Two separate gaps follow. Adjusted
+        // closes are net of dividends paid since, so for a 3%-yielding name
+        // the low reads roughly 3% under the real one; and a weekly close
+        // cannot see an intraweek extreme at all. The true range would need
+        // daily h/l, which the free tier gives only for the newest bar.
         lo52: weeklyCloses.length ? Math.min(...weeklyCloses.slice(-52)) : null,
         hi52: weeklyCloses.length ? Math.max(...weeklyCloses.slice(-52)) : null,
         since: base,
@@ -240,6 +257,99 @@ const RANGES = [
 ];
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Delayed intraday strip, embedded from TradingView.
+//
+// Why an embed and not an API: every free real-time US equity feed checked
+// (Tiingo, Twelve Data, Alpaca, Finnhub, FMP, EODHD, marketdata.app) is
+// licensed for internal or non-display use only, because the exchanges
+// charge for showing live quotes to the public. TradingView's widgets are
+// the exception: TradingView displays its own data under its own exchange
+// agreements, so this page never receives, stores or redistributes a price.
+// The same property that rules out the APIs makes this safe -- there is no
+// key, nothing here can be billed, and visitor traffic costs nothing.
+//
+// What it is not: Petra's data. The widget's US stock prices are delayed by
+// the exchanges, and none of these numbers flow into Petra's own figures,
+// guards or charts. Everything else on the page stays end-of-day.
+//
+// TradingView's terms require its attribution to remain "as originally
+// designed", so the logo and link it renders are left alone.
+// ---------------------------------------------------------------------------
+const TV_TAPE_SRC = "https://s3.tradingview.com/external-embedding/embed-widget-ticker-tape.js";
+
+// Exchange-qualified names. Only symbols listed here are shown: guessing an
+// exchange for an unknown ticker risks quoting a different instrument.
+const TV_SYMBOLS = {
+  AAPL: "NASDAQ:AAPL", MSFT: "NASDAQ:MSFT", NVDA: "NASDAQ:NVDA", AMZN: "NASDAQ:AMZN",
+  TSLA: "NASDAQ:TSLA", GOOGL: "NASDAQ:GOOGL", META: "NASDAQ:META", COST: "NASDAQ:COST",
+  "BRK-B": "NYSE:BRK.B", JPM: "NYSE:JPM", V: "NYSE:V", BLK: "NYSE:BLK", KO: "NYSE:KO",
+  SPY: "AMEX:SPY", QQQ: "NASDAQ:QQQ", DIA: "AMEX:DIA",
+};
+// Crypto trades around the clock and the widget streams it in real time, so
+// these are the lines that visibly move in the evening and at the weekend,
+// when every equity line is frozen at the last close.
+const TV_CRYPTO = [
+  { proName: "BITSTAMP:BTCUSD", title: "Bitcoin" },
+  { proName: "BITSTAMP:ETHUSD", title: "Ethereum" },
+];
+
+class TVTape extends React.Component {
+  constructor(props) {
+    super(props);
+    this.box = React.createRef();
+  }
+
+  // React will not execute a <script> it renders, so the embed is built by
+  // hand once the container exists. The parent keys this component on the
+  // symbol list and theme, so any change remounts it with a fresh widget
+  // rather than patching an iframe React does not own.
+  componentDidMount() {
+    const box = this.box.current;
+    if (!box) return;
+    const slot = document.createElement("div");
+    slot.className = "tradingview-widget-container__widget";
+    box.appendChild(slot);
+    // TradingView's stock embed code ships this attribution line beneath the
+    // widget, and its terms require attribution to stay as designed.
+    const credit = document.createElement("div");
+    credit.className = "tradingview-widget-copyright";
+    const a = document.createElement("a");
+    a.href = "https://www.tradingview.com/";
+    a.target = "_blank";
+    a.rel = "noopener nofollow";
+    const span = document.createElement("span");
+    span.className = "blue-text";
+    span.textContent = "Track all markets on TradingView";
+    a.appendChild(span);
+    credit.appendChild(a);
+    box.appendChild(credit);
+    const script = document.createElement("script");
+    script.src = TV_TAPE_SRC;
+    script.async = true;
+    script.textContent = JSON.stringify({
+      symbols: this.props.symbols,
+      showSymbolLogo: false,
+      isTransparent: true,
+      displayMode: "adaptive",
+      colorTheme: this.props.theme === "light" ? "light" : "dark",
+      locale: "en",
+    });
+    box.appendChild(script);
+  }
+
+  render() {
+    return h("div", {
+      ref: this.box,
+      className: "tradingview-widget-container",
+      // Reserve the widget's height up front so the page does not jump when
+      // the iframe arrives, and so a blocked embed leaves a quiet empty band
+      // rather than collapsing the layout.
+      style: { flex: "1 1 auto", minWidth: 0, minHeight: 58 },
+    });
+  }
+}
 
 class App extends React.Component {
   constructor(props) {
@@ -474,8 +584,8 @@ class App extends React.Component {
           ["Prev close", fmt(os.prev)],
           ["Day high", fmt(os.high)],
           ["Day low", fmt(os.low)],
-          ["52-wk high", fmt(os.hi52)],
-          ["52-wk low", fmt(os.lo52)],
+          ["52-wk high (adj.)", fmt(os.hi52)],
+          ["52-wk low (adj.)", fmt(os.lo52)],
           ["Volume", vol(os.volume)],
           ["Market cap", cap(os.mcap)],
           [os.epsFy ? `P/E (FY${String(os.epsFy).slice(-2)})` : "P/E (FY)", os.pe ? os.pe.toFixed(1) : "--"],
@@ -596,15 +706,27 @@ class App extends React.Component {
     const project = v => Math.log(v);
     const pLo = project(lo), pHi = project(hi), span = pHi - pLo || 1;
     const W = 800, H = 260, pad = 6;
+    // One polyline per contiguous run, not one per series. Skipping nulls
+    // and joining what is left draws a straight line across the hole, which
+    // renders a gap in the data as real, smooth price movement -- the most
+    // misleading thing a chart can do quietly.
     lines.forEach(line => {
-      const pts = [];
+      const segments = [];
+      let run = [];
       line.values.forEach((v, i) => {
-        if (v === null) return;
+        if (v === null || v === undefined) {
+          if (run.length) { segments.push(run); run = []; }
+          return;
+        }
         const x = (i / Math.max(1, line.values.length - 1)) * W;
         const y = pad + (H - 2 * pad) * (1 - (project(v) - pLo) / span);
-        pts.push(x.toFixed(1) + "," + y.toFixed(1));
+        run.push(x.toFixed(1) + "," + y.toFixed(1));
       });
-      line.points = pts.join(" ");
+      if (run.length) segments.push(run);
+      // A lone point has no line to draw, so give it a zero-length segment
+      // rather than dropping it silently.
+      line.segments = segments.map(s => (s.length === 1 ? s[0] + " " + s[0] : s.join(" ")));
+      line.gaps = Math.max(0, segments.length - 1);
     });
 
     return {
@@ -628,6 +750,7 @@ class App extends React.Component {
       v.staleDays ? h("div", { role: "status", style: { background: "var(--downbg)", color: "var(--down)", borderBottom: "1px solid var(--line)", padding: "10px 28px", fontSize: 13, textAlign: "center" } },
         `Data is ${v.staleDays} days old — the daily publish has not run since ${v.asof}. Prices below are not current.`) : null,
       this.renderHeader(v),
+      this.renderIntraday(v),
       h("main", { style: { maxWidth: 1480, margin: "0 auto", padding: "0 28px 56px", boxSizing: "border-box", display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12 } },
         this.renderHighlights(v), this.renderTiles(v), this.renderNews(v)),
       this.renderCrossAsset(v),
@@ -651,6 +774,29 @@ class App extends React.Component {
       h("div", { style: { flex: "0 0 auto", display: "flex", alignItems: "center", gap: 8, padding: "0 16px", background: "var(--ink)", color: "var(--bg)", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase", fontSize: 11.5 } },
         h("span", null, "Since " + v.lastShort)),
       h("div", { onMouseEnter: v.pause, onMouseLeave: v.resume, style: { flex: "1 1 auto", overflow: "hidden", display: "flex", alignItems: "center", minWidth: 0 } }, v.tickerTrack));
+  }
+
+  /**
+   * The delayed strip, labelled so nobody mistakes it for Petra's own data.
+   * It follows the visitor's watchlist: index proxies first, then the two
+   * crypto lines, then whatever the visitor is watching.
+   */
+  renderIntraday(v) {
+    const mapped = t => TV_SYMBOLS[t] ? { proName: TV_SYMBOLS[t], title: t } : null;
+    const proxies = ["SPY", "QQQ", "DIA"].map(mapped).filter(Boolean);
+    const watch = this.visible().map(s => mapped(s.t)).filter(Boolean);
+    const symbols = proxies.concat(TV_CRYPTO, watch);
+    const key = v.theme + "|" + symbols.map(s => s.proName).join(",");
+    const label = { fontFamily: MONO, fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" };
+    return h("section", {
+      "aria-label": "Delayed intraday quotes, from TradingView",
+      style: { maxWidth: 1480, margin: "0 auto 14px", padding: "0 28px", boxSizing: "border-box" },
+    },
+      h("div", { className: "intraday" },
+        h("div", { className: "intraday-label" },
+          h("span", { style: label }, "Intraday"),
+          h("span", { style: { fontSize: 11.5, color: "var(--mute)", whiteSpace: "nowrap" } }, "Stocks delayed · crypto live")),
+        h(TVTape, { key, symbols, theme: v.theme })));
   }
 
   renderHeader(v) {
@@ -785,9 +931,10 @@ class App extends React.Component {
           h("div", { style: { display: "flex", gap: 4 } },
             ca.windows.map(w => h("button", { key: w.label, onClick: w.pick, style: { border: 0, borderRadius: 6, padding: "4px 10px", fontFamily: MONO, fontSize: 12, cursor: "pointer", background: w.bg, color: w.color } }, w.label)))),
         h("div", { style: { fontSize: 12.5, color: "var(--mute)", marginBottom: 12 } },
-          "Rebased to 100 at " + ca.from + ". Log scale, weekly closes."),
+          "Rebased to 100 at " + ca.from + ". Log scale, weekly closes."
+          + (ca.lines.some(l => l.gaps) ? " A break in a line is missing data, not a flat price." : "")),
         h("svg", { viewBox: "0 0 800 260", preserveAspectRatio: "none", style: { width: "100%", height: 260, display: "block" } },
-          ca.lines.map(l => h("polyline", { key: l.key, points: l.points, fill: "none", stroke: l.color, strokeWidth: 1.8, vectorEffect: "non-scaling-stroke" }))),
+          ca.lines.flatMap(l => l.segments.map((pts, i) => h("polyline", { key: l.key + ":" + i, points: pts, fill: "none", stroke: l.color, strokeWidth: 1.8, vectorEffect: "non-scaling-stroke" })))),
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))", gap: "8px 16px", marginTop: 14 } },
           ca.lines.map(l => h("div", { key: l.key, style: { display: "flex", flexDirection: "column", gap: 2, borderTop: "1px solid var(--line)", paddingTop: 8 } },
             h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
@@ -814,7 +961,10 @@ class App extends React.Component {
         ". Filings and fundamentals from ",
         h("a", { href: "https://www.sec.gov/edgar", target: "_blank", rel: "noopener noreferrer", style: link }, "SEC EDGAR"),
         " (public domain)."),
-      h("div", null, "End-of-day data, refreshed once each weekday after the US close — not for trading. Market cap and P/E are derived from SEC XBRL filings; P/E is fiscal-year, not trailing twelve months."));
+      h("div", null, "End-of-day data, refreshed once each weekday after the US close — not for trading. Market cap and P/E are derived from SEC XBRL filings; P/E is fiscal-year, not trailing twelve months."),
+      h("div", null, "The intraday strip is ",
+        h("a", { href: "https://www.tradingview.com/", target: "_blank", rel: "noopener nofollow", style: link }, "TradingView"),
+        "'s, not Petra's: US stock prices there are delayed by the exchanges, crypto is real-time, and none of it feeds the figures above. It loads from TradingView, which records the page, the symbols shown and your IP address."));
   }
 
   renderModal(v) {

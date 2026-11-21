@@ -39,6 +39,11 @@ _MIN_INTERVAL = 1.2
 _RETRY_BACKOFF = (5, 15)
 _last_call = 0.0
 
+# The worst case cost of one logical fetch: the first attempt plus every
+# retry. A caller that wants to keep requests in reserve has to budget for
+# this, not for one request per series.
+MAX_REQUEST_COST = len(_RETRY_BACKOFF) + 1
+
 
 class QuotaExhausted(RuntimeError):
     """Alpha Vantage refused the call because the daily budget is gone."""

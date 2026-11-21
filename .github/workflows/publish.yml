@@ -19,26 +19,26 @@ on:
         default: ""
         options: ["", "weekday", "weekend"]
 
+# There is no Pages deploy. Petra is a personal dashboard run locally, not a
+# public site: the page is served from a checkout against the `data` branch
+# (README, "Local run"). Publishing it would make every visitor a third-party
+# viewer of Alpha Vantage and TradingView data, which neither licence clearly
+# covers. The job's output is the `data` branch and nothing else.
 permissions:
   contents: write   # push the data branch
-  pages: write      # deploy-pages
-  id-token: write   # deploy-pages OIDC
   issues: write     # open an alert when a run fails
 
-# Deployments queue rather than cancel. GitHub keeps only one pending run per
-# group, so a third queued run drops the pending one -- at one run a day that
-# is not a concern, and a lost run costs nothing: every Alpha Vantage call
-# returns 100 days of history, so the next run heals the gap.
+# Runs queue rather than cancel. GitHub keeps only one pending run per group,
+# so a third queued run drops the pending one -- at one run a day that is not
+# a concern, and a lost run costs nothing: every Alpha Vantage call returns
+# 100 days of history, so the next run heals the gap.
 concurrency:
-  group: pages
+  group: publish
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +49,11 @@ jobs:
         run: |
           mkdir -p data
           if git fetch --depth=1 origin data 2>/dev/null; then
-            git --work-tree=data checkout FETCH_HEAD -- . 2>/dev/null || true
+            # No `|| true` here. A failed checkout used to be swallowed,
+            # which turned the run into a silent cold start: the fetch guards
+            # would then see no history, and the day's work would be built on
+            # nothing while the log still said the branch had been restored.
+            git --work-tree=data checkout FETCH_HEAD -- .
             echo "restored $(ls data | wc -l) file(s) from the data branch"
           else
             echo "no data branch yet; starting fresh"
@@ -85,30 +89,6 @@ jobs:
           git commit -q -m "data: $(date -u +%Y-%m-%d)" || { echo "nothing changed"; exit 0; }
           git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
 
-      - name: Assemble site
-        run: |
-          mkdir -p _site
-          cp -r web/. _site/
-          mkdir -p _site/data
-          cp data/*.json _site/data/ 2>/dev/null || true
-          ls -la _site _site/data
-
-      # Pages must be enabled by hand, once: Settings -> Pages -> Source:
-      # GitHub Actions. `enablement: true` is left on in case the token ever
-      # gains the permission, but it currently cannot create a Pages site --
-      # POST /repos/{owner}/{repo}/pages is refused with "Resource not
-      # accessible by integration", which is what five nightly runs failed on.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
-      - id: deploy
-        uses: actions/deploy-pages@v4
-
   # This repo has already died once of silent failure: the scheduled run
   # started failing in April, nobody noticed, and the data sat seven months
   # stale behind a workflow that had quietly disabled itself. A failed run
@@ -118,7 +98,13 @@ jobs:
     if: failure()
     runs-on: ubuntu-latest
     permissions:
+      # A job-level block REPLACES the workflow-level one rather than adding
+      # to it, so `actions: read` has to be repeated here. Without it
+      # listJobsForWorkflowRun returns 403, the catch below swallows it, and
+      # the issue reads "(lookup failed: ...)" instead of naming the step --
+      # which was the whole point of rewriting this alert.
       issues: write
+      actions: read
     steps:
       - uses: actions/github-script@v7
         with:
@@ -155,14 +141,10 @@ jobs:
               '  quota is gone. Alpha Vantage answers both its throttle and its',
               '  25/day cap with HTTP 200 and a `Note`/`Information` key, so look',
               '  for `QuotaExhausted` rather than an HTTP error.',
-              '- *Configure/deploy Pages* — Pages is not enabled. The workflow',
-              '  token cannot create a Pages site (`Resource not accessible by',
-              '  integration`), so it must be turned on by hand once:',
-              '  **Settings → Pages → Source: GitHub Actions**.',
               '- *Save data branch* — the `contents: write` permission or the',
               '  branch itself is gone.',
               '',
-              'The dashboard keeps serving the last good data until this is fixed;',
+              'The `data` branch keeps the last good snapshot until this is fixed;',
               'the page shows an explicit staleness warning once it falls behind.',
             ].join("\n");
 

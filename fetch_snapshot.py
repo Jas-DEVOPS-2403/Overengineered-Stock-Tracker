@@ -160,6 +160,10 @@ def run_weekday(budget: av.Budget) -> None:
             {bar_date: bar["c"] for bar_date, bar in bars}
         )
 
+    # Everything in `symbols` so far came off the wire this run. Count it
+    # before the carry-forward loop adds rows that did not.
+    fetched = len(symbols)
+
     # Carry forward anything we could not refresh, so the page keeps the row.
     for symbol in config.ALL_SYMBOLS:
         if symbol in symbols:
@@ -171,10 +175,16 @@ def run_weekday(budget: av.Budget) -> None:
         symbols[symbol] = carried
         stale.append(symbol)
 
-    if not symbols:
+    # The guard has to ask "did this run achieve anything?", not "is there
+    # any data?". Checking `symbols` after the carry-forward loop asked the
+    # second question, so a run where every single fetch failed would
+    # republish yesterday's prices and exit 0 -- a green build on a total
+    # failure, which is the one outcome this project is built to prevent.
+    if not fetched:
         raise RuntimeError(
-            "no symbols resolved and no prior data to fall back on; "
-            "refusing to publish an empty dashboard"
+            "every price fetch failed this run; refusing to republish "
+            "carried-forward prices as a success "
+            "(is ALPHAVANTAGE_API_KEY set, or is the daily quota gone?)"
         )
 
     save(
@@ -233,6 +243,7 @@ def run_weekend(budget: av.Budget, half: int) -> None:
     midpoint = (len(config.ALL_SYMBOLS) + 1) // 2
     chunk = config.ALL_SYMBOLS[:midpoint] if half == 0 else config.ALL_SYMBOLS[midpoint:]
 
+    fetched = 0
     for symbol in chunk:
         try:
             result = av.fetch_weekly(symbol, session, budget)
@@ -243,16 +254,17 @@ def run_weekend(budget: av.Budget, half: int) -> None:
             print(f"  ! {symbol}: {type(exc).__name__}: {exc}")
             continue
         weekly_pairs[symbol] = dict(zip(result["dates"], result["closes"], strict=True))
+        fetched += 1
 
-    # The weekday path already refuses to publish an empty dashboard. This
-    # path had no equivalent, so with no credentials every fetch failed, the
-    # loop swallowed each one, nothing was written, and the step exited 0 --
-    # a green build on a total failure, which is the exact class of silent
-    # death this project is meant to have designed out.
-    if not weekly_pairs:
+    # `weekly_pairs` is seeded from the stored weekly.json before the loop,
+    # so testing it here asked "does history exist?" rather than "did this
+    # run achieve anything?". With the key revoked on a Saturday every fetch
+    # failed, the stored history kept the guard happy, and the job exited 0.
+    if not fetched:
         raise RuntimeError(
-            "no weekly series fetched and none stored; refusing to report "
-            "success on an empty run (is ALPHAVANTAGE_API_KEY set?)"
+            "every weekly fetch failed this run; refusing to report success "
+            "on a run that achieved nothing "
+            "(is ALPHAVANTAGE_API_KEY set, or is the daily quota gone?)"
         )
     save("weekly.json", to_series(weekly_pairs, config.WEEKLY_POINTS))
 
@@ -396,23 +408,53 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
     stored = load(RAW_CROSS)
     series: dict[str, Any] = stored.get("series", {})
 
-    spare = budget.limit - budget.spent - reserve
-    if spare <= 0:
+    def store(key: str, points: list[tuple[str, float]]) -> None:
+        name, klass, unit, _fn, _extra, note = config.CROSS_ASSET[key]
+        series[key] = {
+            "name": name, "class": klass, "unit": unit, "note": note,
+            "fred": key in config.FRED_BACKED,
+            "updated": int(time.time()),
+            "points": [[d, v] for d, v in points[-2000:]],
+        }
+
+    # Free: the equity proxies are already on disk in weekly.json, in the
+    # same adjusted weekly series this rotation would pay to fetch.
+    weekly = to_pairs(load("weekly.json"))
+    reused = set()
+    for key in config.CROSS_ASSET_FROM_WEEKLY:
+        points = sorted(weekly.get(key, {}).items())
+        if points:
+            store(key, points)
+            reused.add(key)
+    if reused:
+        print(f"  cross-asset: reused {', '.join(sorted(reused))} from weekly.json")
+
+    attempted = succeeded = 0
+    if budget.limit - budget.spent - reserve <= 0:
         print("  cross-asset: no budget left today, keeping stored series")
     else:
         now = time.time()
-        # Only series that have actually gone stale. Once all seven are
+        # Only series that have actually gone stale. Once all of them are
         # current the rotation spends nothing and the slack stays available
         # to the equity refresh.
         due = [
             k for k in config.CROSS_ASSET
-            if now - series.get(k, {}).get("updated", 0) >= config.CROSS_ASSET_MAX_AGE
+            if k not in reused
+            and now - series.get(k, {}).get("updated", 0) >= config.CROSS_ASSET_MAX_AGE
         ]
         order = sorted(due, key=lambda k: series.get(k, {}).get("updated", 0))
         if not order:
             print("  cross-asset: all series current, nothing to refresh")
         session = av.new_session()
-        for key in order[:spare]:
+        for key in order:
+            # Check the live counter rather than slicing `order` by a
+            # one-request-per-series estimate: _payload retries twice, so a
+            # single series can cost three requests, and the old slice let
+            # the rotation eat the reserve it was supposed to leave behind.
+            if budget.spent + av.MAX_REQUEST_COST > budget.limit - reserve:
+                print("  cross-asset: holding the rest of the budget in reserve")
+                break
+            attempted += 1
             try:
                 points = av.fetch_cross_asset(key, session, budget)
             except av.QuotaExhausted as exc:
@@ -421,13 +463,8 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"  ! cross-asset {key}: {type(exc).__name__}: {exc}")
                 continue
-            name, klass, unit, _fn, _extra, note = config.CROSS_ASSET[key]
-            series[key] = {
-                "name": name, "class": klass, "unit": unit, "note": note,
-                "fred": key in config.FRED_BACKED,
-                "updated": int(time.time()),
-                "points": [[d, v] for d, v in points[-2000:]],
-            }
+            succeeded += 1
+            store(key, points)
 
     grid = weekly_grid()
     out: dict[str, Any] = {}
@@ -458,6 +495,16 @@ def run_cross_asset(budget: av.Budget, reserve: int = 2) -> None:
         },
     )
     save(RAW_CROSS, {"schema": SCHEMA, "series": series})
+
+    # This rotation could not fail: every per-series exception was swallowed
+    # and the function returned normally, so a provider outage looked exactly
+    # like "nothing was due". Writing the files first and raising afterwards
+    # keeps the partial result and still turns the run red.
+    if attempted and not succeeded:
+        raise RuntimeError(
+            f"all {attempted} cross-asset fetch(es) failed this run; "
+            "the comparison is no longer being refreshed"
+        )
 
 
 _cik_cache: dict[str, str] | None = None

@@ -1,21 +1,42 @@
 # Petra
 
 An end-of-day market watchlist. A GitHub Actions job fetches prices once a day,
-writes a handful of small JSON files, and publishes them with a static page to
-GitHub Pages. No server, no database, no API key in the browser, nothing that
+writes a handful of small JSON files to a `data` branch, and a static page
+reads them. No server, no database, no API key in the browser, nothing that
 can generate a bill.
 
 Named for the Nabataean caravan city that taxed the incense routes — a trading
 post cut into bare rock.
 
+## Status
+
+The data pipeline works. The daily job fetches and publishes to the
+[`data` branch](../../tree/data), which holds the current snapshot.
+
+The page is a personal dashboard, run locally against that branch (see
+[Local run](#local-run)), and is deliberately not hosted. Hosting it would
+make every visitor a third-party viewer of Alpha Vantage and TradingView
+data, and neither set of terms clearly covers that: Alpha Vantage's do not
+address redistribution, and TradingView limits its widgets to "personal or
+internal business purposes".
+
+Petra is a market data platform and a simulation harness. Data is end-of-day,
+any execution modelled on top of it is simulated, and the scheduler is
+best-effort; the specifics are in
+[Known limitations](#known-limitations-by-design). It is not a trading system
+and not investment advice.
+
 ## What it does
 
-- Tracks 18 US tickers plus three index-proxy ETFs.
+- Tracks 13 US tickers plus three index-proxy ETFs.
 - Publishes close, open, day high/low, volume, previous close and change.
 - Charts 5D / 1M / 3M from daily bars and 1Y / 5Y from adjusted weekly closes.
 - Derives market cap and P/E from SEC XBRL filings.
 - Shows recent SEC filings per company as the news rail.
 - Diffs everything against your last visit, entirely in the browser.
+- Shows a delayed intraday strip above the dashboard, embedded from
+  TradingView: US stocks delayed by the exchanges, crypto in real time. None of
+  it is Petra's data, and none of it feeds Petra's figures.
 
 ## Architecture
 
@@ -24,8 +45,10 @@ GitHub Actions (once daily, 23:00 UTC)
   -> Alpha Vantage   TIME_SERIES_DAILY (weekdays), WEEKLY_ADJUSTED (weekends)
   -> SEC EDGAR       filings, shares outstanding, EPS
   -> data/*.json     pushed to an orphan `data` branch (one commit, force-pushed)
-  -> _site           web/ + data/ uploaded as a Pages artifact
-  -> GitHub Pages    static page fetches its own JSON
+
+Local checkout
+  -> web/data/       extracted from the `data` branch
+  -> web/index.html  static page fetches its own JSON
 ```
 
 Five published files, each refreshed only as often as it changes:
@@ -128,7 +151,8 @@ The provider choice was then decided by licensing rather than features:
 Result:
 
 - Alpha Vantage for prices, SEC EDGAR for filings and fundamentals, Finnhub
-  gone. Every source in the stack permits republication.
+  gone. No source in the stack forbids republication: EDGAR is public domain,
+  and Alpha Vantage's terms do not address it.
 - Free `GLOBAL_QUOTE`/`TIME_SERIES_DAILY` data is end-of-day only, because
   realtime US data is governed by exchange and FINRA rules. So Petra is an
   end-of-day dashboard and says so, rather than implying a feed it does not
@@ -137,6 +161,41 @@ Result:
   pacing, and no dropped-run problem: each call returns 100 days of history,
   so a missed run heals itself on the next one.
 - Runtime dependencies went from six packages to one (`requests`).
+
+### Intraday: an embed, not an API
+
+Re-checked in November 2026 for a free source of near-real-time US quotes.
+They exist, and every one is licensed for internal use only:
+
+- **Tiingo**'s free tier carries a consolidated real-time feed; showing it
+  publicly needs a paid redistribution licence.
+- **Twelve Data**'s free real-time US data is non-display.
+- **Alpaca** streams IEX in real time, but its service is for US residents and
+  its terms forbid public display.
+- **Massive** (formerly Polygon.io) is end-of-day on its free tier, with display
+  rights only on paid business plans.
+
+The reason is the same each time: the exchanges charge for showing live
+quotes to the public, and a free tier cannot pass that licence on.
+
+TradingView's embeddable widgets are the exception, because TradingView shows
+its own data under its own exchange agreements. The page embeds a ticker tape
+and never receives, stores or republishes a price. The terms of that:
+
+- **US stocks are delayed.** TradingView's widget FAQ: *"Exchanges want each
+  website to pay fees for real-time data. As per their requirements we are only
+  allowed to stream delayed data."* The widget marks delayed quotes with a
+  "D". A paid TradingView plan does not change this.
+- **Crypto and forex are real-time**, so the crypto lines are the ones that
+  move in the evening and at the weekend.
+- **Display only.** Widget data cannot be read back, so it cannot be rebased,
+  guarded or checked for staleness. It sits in its own labelled band and stays
+  out of every figure Petra computes.
+- **Attribution stays as designed.** TradingView's terms require it, so the
+  logo and the "Track all markets on TradingView" line are left alone.
+- **Licence scope.** TradingView's terms limit use to "personal or internal
+  business purposes". A personal, non-commercial project is the most
+  reasonable reading of that, but the terms do not say so expressly.
 
 ## Across asset classes
 
@@ -184,17 +243,16 @@ endorsed or certified by the Federal Reserve Bank of St. Louis."*
 Worth stating plainly, because it is a property of the design rather than a
 setting someone remembered to switch on:
 
-1. **Visitor traffic cannot cause API calls.** The page only ever fetches
-   static JSON from Pages. Upstream APIs are called exclusively by the cron, at
-   a frequency fixed by the schedule. A bot hitting the page a million times
+1. **Loading the page cannot cause API calls.** Petra's own data is only ever
+   static JSON. Upstream APIs are called exclusively by the cron, at a
+   frequency fixed by the schedule, so reloading the page any number of times
    triggers zero upstream requests. A browser-held key or a serverless proxy
-   would both have that hole.
-2. **Nothing in the stack has a payment method.** Pages, Alpha Vantage and
-   EDGAR are all free with no card attached. Pages' 100 GB/month is a soft
-   limit — GitHub throttles or emails, it does not invoice. Actions minutes are
-   unlimited on public repositories.
-3. The only consumable is Pages bandwidth, and at ~15 KB gzipped that is
-   roughly six million pageviews to reach a soft limit that carries no charge.
+   would both break that, and would matter the day the page is hosted. The
+   intraday strip does not change this: it is TradingView's iframe, served by
+   TradingView, with no key of ours and no quota of ours behind it.
+2. **Nothing in the stack has a payment method.** Alpha Vantage and EDGAR are
+   free with no card attached, and Actions minutes are unlimited on public
+   repositories.
 
 **Adding a serverless proxy would reintroduce the risk.** That is the one
 change this design should not accept without rethinking the above.
@@ -228,6 +286,52 @@ change this design should not accept without rethinking the above.
 - **The watchlist is per-browser.** It lives in `localStorage`; there are no
   accounts and no server to hold one.
 
+- **The scheduler is best-effort.** Measured on this repo's own history under
+  its previous `*/15` schedule: 1,437 snapshot commits across 39.1 days, about
+  37 runs a day against 96 nominal slots, so roughly 62% of scheduled runs
+  never fired. The daily schedule is much less exposed and a missed run heals
+  itself, since each call returns 100 days. Anything built on top of this that
+  acts on a schedule has to treat a missed decision as ordinary rather than
+  exceptional.
+- **The intraday strip is a third-party embed.** It depends on TradingView
+  being reachable, an ad blocker may hide it, and TradingView records the
+  embedding page, the symbols shown and the viewer's IP address. The page
+  says so in its footer. If the strip fails to load, the band is left empty
+  and nothing else on the page is affected.
+- **No crypto price is *the* price.** Crypto has no consolidated tape and no
+  NBBO, so quoted prices differ between venues. The stored crypto series is one
+  source's daily close; a cross-venue average is an average, not a price anyone
+  can trade at. Whichever is shown, the page names it.
+
+## Direction
+
+The intended end point is a strategy runner on data worth trusting. Each step
+depends on the previous one being correct, so they are built in order rather
+than together.
+
+1. **Market data platform.** Licence-clean sources, a fixed request budget, a
+   daily publish. Done.
+2. **Backtest engine.** A small set of strategies over stored daily bars,
+   measured against buy-and-hold, with fees and slippage charged and
+   risk-adjusted results reported: CAGR, Sharpe, max drawdown, turnover, and
+   fees as a share of gross return. A signal computed on bar *t* executes at
+   *t+1*'s open, never at *t*'s close. Not started.
+3. **Paper execution.** A scheduled job that computes a signal, simulates a
+   fill, logs it, and reports the gap between what the backtest predicted and
+   what the scheduled run produced. Not started.
+4. **Near-live data.** A delayed *display* strip exists already (see
+   [Intraday: an embed, not an API](#intraday-an-embed-not-an-api)). Near-live
+   data that Petra *computes with* is crypto only, and only once 2 and 3
+   produce figures worth reading. US equity real-time data is licensed through the exchanges and
+   stays out of reach. Crypto is less gated but not ungated: no major venue
+   licenses a third party to display its market data, so there is no exchange
+   websocket to stream. What is possible is a keyless, attributed aggregator
+   fetched by the browser on a slow poll -- no key to leak, no proxy to pay
+   for, and the cost-safety property above survives intact.
+
+Execution is simulated throughout. No real orders and no real money at any
+step.
+
 ## Tests and CI
 
 ```bash
@@ -236,7 +340,7 @@ ruff check .
 pytest
 ```
 
-44 tests, all offline — both providers are faked, so the suite costs none of
+54 tests, all offline — both providers are faked, so the suite costs none of
 the 25-request daily budget and cannot be broken by a provider outage. CI runs
 `ruff` and `pytest` on every push and pull request.
 
@@ -272,28 +376,36 @@ happen silently again.
 
 ## Local run
 
+Against the data the daily job published, which costs no API quota:
+
+```bash
+git fetch origin data
+mkdir -p web/data
+git archive -o data.tar FETCH_HEAD && tar -xf data.tar -C web/data && rm data.tar
+python -m http.server -d web 8137      # http://localhost:8137
+```
+
+`git archive` rather than `git checkout FETCH_HEAD -- .`, which would also
+stage the data files into `main`'s index. The same commands work in
+PowerShell, with `Remove-Item data.tar` for the last step.
+
+To build the data yourself instead, which spends the day's Alpha Vantage
+quota:
+
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # fill in ALPHAVANTAGE_API_KEY, SEC_CONTACT_EMAIL
-
 ALPHAVANTAGE_API_KEY=... SEC_CONTACT_EMAIL=you@example.com python fetch_snapshot.py
-
 mkdir -p web/data && cp data/*.json web/data/
-python -m http.server -d web 8137      # http://localhost:8137
 ```
 
 `PETRA_FORCE_MODE=weekend` exercises the weekly/fundamentals path on a weekday.
 
-## Deploying
+## The daily job
 
-Push to `main`. Then, once:
-
-- Settings -> Pages -> Source: **GitHub Actions** (the workflow also sets this
-  itself via `configure-pages`).
-- Add repository secrets `ALPHAVANTAGE_API_KEY` and `SEC_CONTACT_EMAIL`.
-
-The workflow runs daily and on `workflow_dispatch`, which takes an optional
-`mode` input to force the weekday or weekend path.
+Add repository secrets `ALPHAVANTAGE_API_KEY` and `SEC_CONTACT_EMAIL`. The
+workflow runs daily and on `workflow_dispatch`, which takes an optional
+`mode` input to force the weekday or weekend path. Its only output is the
+`data` branch; there is no deploy step.
 
 ## Project layout
 
@@ -303,7 +415,7 @@ The workflow runs daily and on `workflow_dispatch`, which takes an optional
 - `app/edgar.py` — filings and XBRL fundamentals
 - `app/config.py` — tracked symbols, display names, sector map
 - `web/index.html` — the entire front end; React from a CDN, no build step
-- `.github/workflows/publish.yml` — fetch, push the data branch, deploy Pages
+- `.github/workflows/publish.yml` — fetch, push the data branch, alert on failure
 
 ## Credits
 
